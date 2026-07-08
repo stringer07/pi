@@ -7,6 +7,10 @@ type SubmitContext = {
 		addToHistory?: (text: string) => void;
 		setText: (text: string) => void;
 	};
+	ui: {
+		getScreenMode: () => "scrollback" | "full-screen";
+		jumpMessageViewportToBottom: () => void;
+	};
 	session: {
 		isCompacting: boolean;
 		isStreaming: boolean;
@@ -37,6 +41,10 @@ function createSubmitContext(): SubmitContext {
 			addToHistory: vi.fn(),
 			setText: vi.fn(),
 		},
+		ui: {
+			getScreenMode: () => "scrollback",
+			jumpMessageViewportToBottom: vi.fn(),
+		},
 		session: {
 			isCompacting: false,
 			isStreaming: false,
@@ -58,6 +66,17 @@ describe("InteractiveMode startup input", () => {
 		expect(context.pendingUserInputs).toEqual(["early prompt"]);
 		expect(context.flushPendingBashComponents).toHaveBeenCalledTimes(1);
 		expect(context.editor.addToHistory).toHaveBeenCalledWith("early prompt");
+	});
+
+	it("jumps the Full-screen Message viewport to the live bottom on normal prompt submit", async () => {
+		const context = createSubmitContext();
+		context.ui.getScreenMode = () => "full-screen";
+		interactiveModePrototype.setupEditorSubmitHandler.call(context);
+
+		await context.defaultEditor.onSubmit?.(" follow this ");
+
+		expect(context.ui.jumpMessageViewportToBottom).toHaveBeenCalledTimes(1);
+		expect(context.pendingUserInputs).toEqual(["follow this"]);
 	});
 
 	it("returns queued startup input before installing a new input callback", async () => {

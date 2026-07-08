@@ -16,9 +16,20 @@ import {
 	type TerminalColorScheme,
 } from "./terminal-colors.ts";
 import { deleteKittyImage, getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
-import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.ts";
+import {
+	extractSegments,
+	normalizeTerminalOutput,
+	sliceByColumn,
+	sliceWithWidth,
+	truncateToWidth,
+	visibleWidth,
+} from "./utils.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
+const ALTERNATE_SCREEN_ENABLE_SEQUENCE = "\x1b[?1049h";
+const ALTERNATE_SCREEN_DISABLE_SEQUENCE = "\x1b[?1049l";
+const MOUSE_REPORTING_ENABLE_SEQUENCE = "\x1b[?1000h\x1b[?1006h";
+const MOUSE_REPORTING_DISABLE_SEQUENCE = "\x1b[?1000l\x1b[?1006l";
 
 interface KittyImageHeader {
 	ids: number[];
@@ -94,6 +105,42 @@ type PendingOsc11BackgroundQuery = {
 	resolve: ((rgb: RgbColor | undefined) => void) | undefined;
 	timer: NodeJS.Timeout | undefined;
 };
+
+type PointerScrollTarget = {
+	component: Component;
+	scrollUp: () => boolean;
+	scrollDown: () => boolean;
+};
+
+type FullScreenPointerEvent =
+	| { kind: "wheel"; direction: "up" | "down"; row: number; col: number }
+	| { kind: "other"; row: number; col: number };
+
+function parseFullScreenPointerEvent(data: string): FullScreenPointerEvent | undefined {
+	const match = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/);
+	if (!match) {
+		return undefined;
+	}
+
+	const code = Number.parseInt(match[1]!, 10);
+	const col = Number.parseInt(match[2]!, 10) - 1;
+	const row = Number.parseInt(match[3]!, 10) - 1;
+	if (!Number.isFinite(code) || !Number.isFinite(col) || !Number.isFinite(row)) {
+		return undefined;
+	}
+
+	if ((code & 64) !== 0) {
+		const wheelDirection = code & 0b11;
+		if (wheelDirection === 0) {
+			return { kind: "wheel", direction: "up", row, col };
+		}
+		if (wheelDirection === 1) {
+			return { kind: "wheel", direction: "down", row, col };
+		}
+	}
+
+	return { kind: "other", row, col };
+}
 
 /**
  * Interface for components that can receive focus and display a hardware cursor.
@@ -230,6 +277,32 @@ export interface OverlayHandle {
 	isFocused(): boolean;
 }
 
+export type ScreenMode = "scrollback" | "full-screen";
+export type ScreenRegion = "message-viewport" | "composer-region";
+
+export interface TUIChildOptions {
+	region?: ScreenRegion;
+}
+
+export interface TUIOptions {
+	screenMode?: ScreenMode;
+}
+
+type FullScreenLayout = {
+	frameLines: string[];
+	messageLines: string[];
+	messageViewportHeight: number;
+	totalMessageLines: number;
+	maxMessageViewportDistanceFromBottom: number;
+	messageViewportDistanceFromBottom: number;
+};
+
+type MessageViewportWindow = {
+	lines: string[];
+	start: number;
+	end: number;
+};
+
 type OverlayStackEntry = {
 	component: Component;
 	options?: OverlayOptions;
@@ -319,15 +392,24 @@ export class TUI extends Container {
 	private pendingOsc11BackgroundQueries: PendingOsc11BackgroundQuery[] = [];
 	private terminalColorSchemeListeners = new Set<(scheme: TerminalColorScheme) => void>();
 	private terminalColorSchemeNotificationsEnabled = false;
+	private readonly screenMode: ScreenMode;
+	private readonly childRegions = new Map<Component, ScreenRegion>();
+	private fullScreenMessageViewportDistanceFromBottom = 0;
+	private fullScreenMessageViewportLastMessageLineCount = 0;
+	private fullScreenMessageViewportLastMessageLines: string[] = [];
+	private fullScreenMessageViewportHasNewContentBelow = false;
+	private fullScreenMessageViewportJumpToBottomKeyDisplay = "";
+	private fullScreenPointerScrollTarget?: PointerScrollTarget;
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
 	private overlayStack: OverlayStackEntry[] = [];
 	private overlayFocusRestore: OverlayFocusRestoreState = { status: "inactive" };
 
-	constructor(terminal: Terminal, showHardwareCursor?: boolean) {
+	constructor(terminal: Terminal, showHardwareCursor?: boolean, options: TUIOptions = {}) {
 		super();
 		this.terminal = terminal;
+		this.screenMode = options.screenMode ?? "scrollback";
 		if (showHardwareCursor !== undefined) {
 			this.showHardwareCursor = showHardwareCursor;
 		}
@@ -337,8 +419,372 @@ export class TUI extends Container {
 		return this.fullRedrawCount;
 	}
 
+	getScreenMode(): ScreenMode {
+		return this.screenMode;
+	}
+
+	getScreenRegion(component: Component): ScreenRegion | undefined {
+		return this.childRegions.get(component);
+	}
+
+	override addChild(component: Component, options?: TUIChildOptions): void {
+		super.addChild(component);
+		if (options?.region === undefined) {
+			this.childRegions.delete(component);
+			return;
+		}
+		this.childRegions.set(component, options.region);
+	}
+
+	override removeChild(component: Component): void {
+		super.removeChild(component);
+		this.childRegions.delete(component);
+	}
+
+	override clear(): void {
+		super.clear();
+		this.childRegions.clear();
+	}
+
+	override render(width: number): string[] {
+		switch (this.screenMode) {
+			case "scrollback":
+				return this.renderScrollbackMode(width);
+			case "full-screen":
+				return this.renderFullScreenMode(width);
+		}
+	}
+
+	private renderScrollbackMode(width: number): string[] {
+		return super.render(width);
+	}
+
+	private renderFullScreenMode(width: number): string[] {
+		if (this.childRegions.size === 0) {
+			return super.render(width);
+		}
+
+		const layout = this.getFullScreenLayout(width, this.terminal.rows, { preserveHistoricalView: true });
+		this.fullScreenMessageViewportDistanceFromBottom = layout.messageViewportDistanceFromBottom;
+		this.fullScreenMessageViewportLastMessageLineCount = layout.totalMessageLines;
+		this.fullScreenMessageViewportLastMessageLines = layout.messageLines;
+		return layout.frameLines;
+	}
+
+	private renderChildren(children: readonly Component[], width: number): string[] {
+		const lines: string[] = [];
+		for (const child of children) {
+			const childLines = child.render(width);
+			for (const line of childLines) {
+				lines.push(line);
+			}
+		}
+		return lines;
+	}
+
+	private getFullScreenLayout(
+		width: number,
+		height: number,
+		options: { preserveHistoricalView?: boolean } = {},
+	): FullScreenLayout {
+		const messageLines = this.renderChildren(this.getChildrenOutsideComposerRegion(), width);
+		const composerLines = this.renderChildren(this.getChildrenInScreenRegion("composer-region"), width);
+		const composerHeight = Math.min(height, composerLines.length);
+		const messageViewportHeight = Math.max(0, height - composerHeight);
+		let messageViewportDistanceFromBottom = this.fullScreenMessageViewportDistanceFromBottom;
+
+		if (options.preserveHistoricalView && messageViewportDistanceFromBottom > 0) {
+			if (messageLines.length > this.fullScreenMessageViewportLastMessageLineCount) {
+				messageViewportDistanceFromBottom +=
+					messageLines.length - this.fullScreenMessageViewportLastMessageLineCount;
+				this.fullScreenMessageViewportHasNewContentBelow = true;
+			} else if (
+				this.hasMessageViewportContentChangedBelowHistoricalWindow(
+					this.fullScreenMessageViewportLastMessageLines,
+					messageLines,
+					this.fullScreenMessageViewportLastMessageLineCount,
+					messageViewportDistanceFromBottom,
+				)
+			) {
+				this.fullScreenMessageViewportHasNewContentBelow = true;
+			}
+		}
+
+		const maxMessageViewportDistanceFromBottom = this.getMaxMessageViewportDistanceFromBottom(
+			messageLines.length,
+			messageViewportHeight,
+		);
+		messageViewportDistanceFromBottom = Math.min(
+			messageViewportDistanceFromBottom,
+			maxMessageViewportDistanceFromBottom,
+		);
+		if (messageViewportDistanceFromBottom === 0) {
+			this.fullScreenMessageViewportHasNewContentBelow = false;
+		}
+
+		return {
+			frameLines: this.composeFullScreenLayout(
+				width,
+				messageLines,
+				composerLines,
+				height,
+				messageViewportHeight,
+				messageViewportDistanceFromBottom,
+			),
+			messageLines,
+			messageViewportHeight,
+			totalMessageLines: messageLines.length,
+			maxMessageViewportDistanceFromBottom,
+			messageViewportDistanceFromBottom,
+		};
+	}
+
+	private hasMessageViewportContentChangedBelowHistoricalWindow(
+		previousLines: readonly string[],
+		nextLines: readonly string[],
+		previousLineCount: number,
+		messageViewportDistanceFromBottom: number,
+	): boolean {
+		if (previousLines.length === 0 || nextLines.length !== previousLineCount) {
+			return false;
+		}
+
+		const hiddenBelowStart = Math.max(0, previousLineCount - messageViewportDistanceFromBottom);
+		for (let index = hiddenBelowStart; index < previousLineCount; index++) {
+			if (previousLines[index] !== nextLines[index]) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private composeFullScreenLayout(
+		width: number,
+		messageLines: string[],
+		composerLines: string[],
+		height: number,
+		messageViewportHeight: number,
+		messageViewportDistanceFromBottom: number,
+	): string[] {
+		if (height <= 0) {
+			return [];
+		}
+
+		if (composerLines.length >= height) {
+			return composerLines.slice(-height);
+		}
+
+		const visibleMessageWindow = this.getVisibleMessageViewportWindow(
+			messageLines,
+			messageViewportHeight,
+			messageViewportDistanceFromBottom,
+		);
+		const visibleMessageLines = this.decorateVisibleMessageViewportLines(
+			visibleMessageWindow,
+			messageViewportDistanceFromBottom,
+			messageLines.length,
+			width,
+		);
+		const topPadding = Math.max(0, messageViewportHeight - visibleMessageLines.length);
+		return [...Array<string>(topPadding).fill(""), ...visibleMessageLines, ...composerLines];
+	}
+
+	private getVisibleMessageViewportWindow(
+		messageLines: string[],
+		messageViewportHeight: number,
+		messageViewportDistanceFromBottom: number,
+	): MessageViewportWindow {
+		if (messageViewportHeight <= 0) {
+			return { lines: [], start: 0, end: 0 };
+		}
+
+		const end = Math.max(0, messageLines.length - messageViewportDistanceFromBottom);
+		const start = Math.max(0, end - messageViewportHeight);
+		return {
+			lines: messageLines.slice(start, end),
+			start,
+			end,
+		};
+	}
+
+	private decorateVisibleMessageViewportLines(
+		window: MessageViewportWindow,
+		messageViewportDistanceFromBottom: number,
+		totalMessageLines: number,
+		width: number,
+	): string[] {
+		const visibleMessageLines = [...window.lines];
+		if (visibleMessageLines.length === 0 || messageViewportDistanceFromBottom === 0) {
+			return visibleMessageLines;
+		}
+
+		const topHint = window.start > 0 ? "↑ Older above" : undefined;
+		const bottomHint =
+			window.end < totalMessageLines
+				? this.fullScreenMessageViewportHasNewContentBelow
+					? this.getNewContentIndicatorText()
+					: "↓ Newer below"
+				: undefined;
+		if (!topHint && !bottomHint) {
+			return visibleMessageLines;
+		}
+
+		if (visibleMessageLines.length === 1) {
+			const hints = [topHint, bottomHint].filter((hint): hint is string => hint !== undefined);
+			visibleMessageLines[0] = this.decorateViewportHintLine(visibleMessageLines[0] ?? "", hints.join(" · "), width);
+			return visibleMessageLines;
+		}
+
+		if (topHint) {
+			visibleMessageLines[0] = this.decorateViewportHintLine(visibleMessageLines[0] ?? "", topHint, width, {
+				position: "prefix",
+			});
+		}
+		if (bottomHint) {
+			const lastIndex = visibleMessageLines.length - 1;
+			visibleMessageLines[lastIndex] = this.decorateViewportHintLine(
+				visibleMessageLines[lastIndex] ?? "",
+				bottomHint,
+				width,
+				{ position: "suffix" },
+			);
+		}
+
+		return visibleMessageLines;
+	}
+
+	private getNewContentIndicatorText(): string {
+		const jumpKeyDisplay = this.fullScreenMessageViewportJumpToBottomKeyDisplay.trim();
+		if (jumpKeyDisplay.length === 0) {
+			return "↓ New content below";
+		}
+		return `↓ New content below · ${jumpKeyDisplay}`;
+	}
+
+	private decorateViewportHintLine(
+		baseLine: string,
+		hintText: string,
+		width: number,
+		options: { position?: "prefix" | "suffix" } = {},
+	): string {
+		const separator = " · ";
+		const text =
+			options.position === "prefix" ? `${hintText}${separator}${baseLine}` : `${baseLine}${separator}${hintText}`;
+		return truncateToWidth(text, width);
+	}
+
+	private getMaxMessageViewportDistanceFromBottom(totalMessageLines: number, messageViewportHeight: number): number {
+		return Math.max(0, totalMessageLines - messageViewportHeight);
+	}
+
+	private getCurrentFullScreenLayout(): FullScreenLayout | undefined {
+		if (this.screenMode !== "full-screen" || this.childRegions.size === 0) {
+			return undefined;
+		}
+
+		const layout = this.getFullScreenLayout(this.terminal.columns, this.terminal.rows, {
+			preserveHistoricalView: true,
+		});
+		this.fullScreenMessageViewportDistanceFromBottom = layout.messageViewportDistanceFromBottom;
+		this.fullScreenMessageViewportLastMessageLineCount = layout.totalMessageLines;
+		this.fullScreenMessageViewportLastMessageLines = layout.messageLines;
+		return layout;
+	}
+
+	private adjustMessageViewportDistanceFromBottom(delta: number): boolean {
+		const layout = this.getCurrentFullScreenLayout();
+		if (!layout || layout.messageViewportHeight <= 0 || layout.maxMessageViewportDistanceFromBottom === 0) {
+			return false;
+		}
+
+		const nextDistanceFromBottom = Math.max(
+			0,
+			Math.min(layout.maxMessageViewportDistanceFromBottom, layout.messageViewportDistanceFromBottom + delta),
+		);
+		if (nextDistanceFromBottom === layout.messageViewportDistanceFromBottom) {
+			return false;
+		}
+
+		this.fullScreenMessageViewportDistanceFromBottom = nextDistanceFromBottom;
+		if (nextDistanceFromBottom === 0) {
+			this.fullScreenMessageViewportHasNewContentBelow = false;
+		}
+		this.requestRender();
+		return true;
+	}
+
+	private getChildrenInScreenRegion(region: ScreenRegion): Component[] {
+		return this.children.filter((child) => this.childRegions.get(child) === region);
+	}
+
+	private getChildrenOutsideComposerRegion(): Component[] {
+		return this.children.filter((child) => this.childRegions.get(child) !== "composer-region");
+	}
+
 	getShowHardwareCursor(): boolean {
 		return this.showHardwareCursor;
+	}
+
+	pageMessageViewportUp(): boolean {
+		const layout = this.getCurrentFullScreenLayout();
+		if (!layout || layout.messageViewportHeight <= 0) {
+			return false;
+		}
+		return this.adjustMessageViewportDistanceFromBottom(layout.messageViewportHeight);
+	}
+
+	pageMessageViewportDown(): boolean {
+		const layout = this.getCurrentFullScreenLayout();
+		if (!layout || layout.messageViewportHeight <= 0) {
+			return false;
+		}
+		return this.adjustMessageViewportDistanceFromBottom(-layout.messageViewportHeight);
+	}
+
+	scrollMessageViewportUp(): boolean {
+		return this.adjustMessageViewportDistanceFromBottom(1);
+	}
+
+	scrollMessageViewportDown(): boolean {
+		return this.adjustMessageViewportDistanceFromBottom(-1);
+	}
+
+	jumpMessageViewportToBottom(): boolean {
+		const layout = this.getCurrentFullScreenLayout();
+		if (!layout || layout.messageViewportDistanceFromBottom === 0) {
+			return false;
+		}
+
+		this.fullScreenMessageViewportDistanceFromBottom = 0;
+		this.fullScreenMessageViewportHasNewContentBelow = false;
+		this.requestRender();
+		return true;
+	}
+
+	setFullScreenMessageViewportJumpToBottomKeyDisplay(keyDisplay: string | undefined): void {
+		const nextKeyDisplay = keyDisplay?.trim() ?? "";
+		if (this.fullScreenMessageViewportJumpToBottomKeyDisplay === nextKeyDisplay) {
+			return;
+		}
+		this.fullScreenMessageViewportJumpToBottomKeyDisplay = nextKeyDisplay;
+		if (this.screenMode === "full-screen") {
+			this.requestRender();
+		}
+	}
+
+	setFullScreenPointerScrollTarget(
+		component: Component | undefined,
+		handlers?: { scrollUp: () => boolean; scrollDown: () => boolean },
+	): void {
+		if (!component || !handlers) {
+			this.fullScreenPointerScrollTarget = undefined;
+			return;
+		}
+		this.fullScreenPointerScrollTarget = {
+			component,
+			scrollUp: handlers.scrollUp,
+			scrollDown: handlers.scrollDown,
+		};
 	}
 
 	setShowHardwareCursor(enabled: boolean): void {
@@ -638,12 +1084,16 @@ export class TUI extends Container {
 			(data) => this.handleInput(data),
 			() => this.requestRender(),
 		);
+		if (this.screenMode === "full-screen") {
+			this.terminal.write(ALTERNATE_SCREEN_ENABLE_SEQUENCE);
+			this.terminal.write(MOUSE_REPORTING_ENABLE_SEQUENCE);
+		}
 		this.terminal.hideCursor();
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031h");
 		}
 		this.queryCellSize();
-		this.requestRender();
+		this.requestRender(this.screenMode === "full-screen");
 	}
 
 	addInputListener(listener: InputListener): () => void {
@@ -705,6 +1155,10 @@ export class TUI extends Container {
 			this.terminal.write("\r\n");
 		}
 
+		if (this.screenMode === "full-screen") {
+			this.terminal.write(MOUSE_REPORTING_DISABLE_SEQUENCE);
+			this.terminal.write(ALTERNATE_SCREEN_DISABLE_SEQUENCE);
+		}
 		this.terminal.showCursor();
 		this.terminal.stop();
 	}
@@ -785,6 +1239,10 @@ export class TUI extends Container {
 
 		// Consume terminal cell size responses without blocking unrelated input.
 		if (this.consumeCellSizeResponse(data)) {
+			return;
+		}
+
+		if (this.handleFullScreenPointerInput(data)) {
 			return;
 		}
 
@@ -888,6 +1346,181 @@ export class TUI extends Container {
 		this.invalidate();
 		this.requestRender();
 		return true;
+	}
+
+	private handleFullScreenPointerInput(data: string): boolean {
+		if (this.screenMode !== "full-screen") {
+			return false;
+		}
+
+		const pointerEvent = parseFullScreenPointerEvent(data);
+		if (!pointerEvent) {
+			return false;
+		}
+
+		if (this.hasOverlay()) {
+			// Visible overlays keep their existing focused-input semantics.
+			// In Full-screen mode we only suppress built-in wheel routing here;
+			// raw wheel input still flows to the focused component.
+			return pointerEvent.kind !== "wheel";
+		}
+
+		if (
+			pointerEvent.row < 0 ||
+			pointerEvent.row >= this.terminal.rows ||
+			pointerEvent.col < 0 ||
+			pointerEvent.col >= this.terminal.columns
+		) {
+			return true;
+		}
+
+		if (pointerEvent.kind !== "wheel") {
+			return true;
+		}
+
+		const layout = this.getFullScreenPointerLayout();
+		if (!layout) {
+			return true;
+		}
+
+		if (pointerEvent.row < layout.messageViewportHeight) {
+			if (pointerEvent.direction === "up") {
+				this.scrollMessageViewportUp();
+				return true;
+			}
+			this.scrollMessageViewportDown();
+			return true;
+		}
+
+		const targetSpan = this.getVisibleFullScreenComponentRowSpan(
+			this.fullScreenPointerScrollTarget?.component,
+			layout.width,
+			layout.height,
+			layout.composerVisibleStartOffset,
+			layout.composerHeight,
+		);
+		if (!targetSpan) {
+			return true;
+		}
+
+		if (pointerEvent.row >= targetSpan.start && pointerEvent.row < targetSpan.end) {
+			if (pointerEvent.direction === "up") {
+				this.fullScreenPointerScrollTarget?.scrollUp();
+				return true;
+			}
+			this.fullScreenPointerScrollTarget?.scrollDown();
+			return true;
+		}
+
+		return true;
+	}
+
+	private getFullScreenPointerLayout():
+		| {
+				width: number;
+				height: number;
+				messageViewportHeight: number;
+				composerHeight: number;
+				composerVisibleStartOffset: number;
+		  }
+		| undefined {
+		if (this.childRegions.size === 0) {
+			return undefined;
+		}
+
+		const width = this.terminal.columns;
+		const height = this.terminal.rows;
+		const composerLines = this.renderChildren(this.getChildrenInScreenRegion("composer-region"), width);
+		const composerHeight = Math.min(height, composerLines.length);
+		return {
+			width,
+			height,
+			messageViewportHeight: Math.max(0, height - composerHeight),
+			composerHeight,
+			composerVisibleStartOffset: Math.max(0, composerLines.length - composerHeight),
+		};
+	}
+
+	private getVisibleFullScreenComponentRowSpan(
+		component: Component | undefined,
+		width: number,
+		height: number,
+		composerVisibleStartOffset: number,
+		composerHeight: number,
+	): { start: number; end: number } | undefined {
+		if (!component) {
+			return undefined;
+		}
+
+		const fullSpan = this.findComponentLineSpanInChildren(
+			this.getChildrenInScreenRegion("composer-region"),
+			component,
+			width,
+			0,
+		);
+		if (!fullSpan) {
+			return undefined;
+		}
+
+		const visibleStart = Math.max(fullSpan.start, composerVisibleStartOffset);
+		const visibleEnd = Math.min(fullSpan.end, composerVisibleStartOffset + composerHeight);
+		if (visibleStart >= visibleEnd) {
+			return undefined;
+		}
+
+		const composerStartRow = height - composerHeight;
+		return {
+			start: composerStartRow + visibleStart - composerVisibleStartOffset,
+			end: composerStartRow + visibleEnd - composerVisibleStartOffset,
+		};
+	}
+
+	private findComponentLineSpanInChildren(
+		children: readonly Component[],
+		target: Component,
+		width: number,
+		startRow: number,
+	): { start: number; end: number } | undefined {
+		let row = startRow;
+		for (const child of children) {
+			const measurement = this.measureComponentLineSpan(child, target, width, row);
+			if (measurement.span) {
+				return measurement.span;
+			}
+			row += measurement.lineCount;
+		}
+		return undefined;
+	}
+
+	private measureComponentLineSpan(
+		component: Component,
+		target: Component,
+		width: number,
+		startRow: number,
+	): { lineCount: number; span?: { start: number; end: number } } {
+		if (!(component instanceof Container)) {
+			const lineCount = component.render(width).length;
+			return {
+				lineCount,
+				...(component === target ? { span: { start: startRow, end: startRow + lineCount } } : {}),
+			};
+		}
+
+		let lineCount = 0;
+		let span: { start: number; end: number } | undefined;
+		for (const child of component.children) {
+			const measurement = this.measureComponentLineSpan(child, target, width, startRow + lineCount);
+			lineCount += measurement.lineCount;
+			if (!span && measurement.span) {
+				span = measurement.span;
+			}
+		}
+
+		if (!span && component === target) {
+			span = { start: startRow, end: startRow + lineCount };
+		}
+
+		return { lineCount, ...(span ? { span } : {}) };
 	}
 
 	/**

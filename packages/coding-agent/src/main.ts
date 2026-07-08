@@ -50,6 +50,7 @@ import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
 const EXTENSION_LOAD_FAILURE_HINT = 'Hint: Start without extensions using "pi -ne".';
+const FULL_SCREEN_MODE_UTILITY_COMMANDS = new Set(["config", "install", "remove", "uninstall", "update", "list"]);
 
 /**
  * Read all content from piped stdin.
@@ -116,6 +117,58 @@ function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {
 
 function isPlainRuntimeMetadataCommand(parsed: Args): boolean {
 	return !parsed.print && parsed.mode === undefined && (parsed.help === true || parsed.listModels !== undefined);
+}
+
+function exitWithCliError(message: string): never {
+	console.error(chalk.red(`Error: ${message}`));
+	process.exit(1);
+}
+
+function getFullScreenModeUtilityCommand(args: readonly string[]): string | undefined {
+	const command = args[0];
+	return command !== undefined && FULL_SCREEN_MODE_UTILITY_COMMANDS.has(command) ? command : undefined;
+}
+
+function validateUtilityCommandFullScreenMode(args: readonly string[]): void {
+	if (!args.includes("--full-screen-mode")) {
+		return;
+	}
+
+	const command = getFullScreenModeUtilityCommand(args);
+	if (command !== undefined) {
+		exitWithCliError(`--full-screen-mode cannot be used with the "${command}" command`);
+	}
+}
+
+function validateFullScreenMode(parsed: Args, stdinIsTTY: boolean, stdoutIsTTY: boolean): void {
+	if (!parsed.fullScreenMode) {
+		return;
+	}
+
+	if (parsed.help) {
+		exitWithCliError("--full-screen-mode cannot be used with --help");
+	}
+	if (parsed.version) {
+		exitWithCliError("--full-screen-mode cannot be used with --version");
+	}
+	if (parsed.listModels !== undefined) {
+		exitWithCliError("--full-screen-mode cannot be used with --list-models");
+	}
+	if (parsed.export !== undefined) {
+		exitWithCliError("--full-screen-mode cannot be used with --export");
+	}
+	if (parsed.print) {
+		exitWithCliError("--full-screen-mode cannot be used with --print");
+	}
+	if (parsed.mode === "json") {
+		exitWithCliError("--full-screen-mode cannot be used with --mode json");
+	}
+	if (parsed.mode === "rpc") {
+		exitWithCliError("--full-screen-mode cannot be used with --mode rpc");
+	}
+	if (!stdinIsTTY || !stdoutIsTTY) {
+		exitWithCliError("--full-screen-mode requires an interactive TTY on stdin and stdout");
+	}
 }
 
 async function prepareInitialMessage(
@@ -488,6 +541,8 @@ export async function main(args: string[], options?: MainOptions) {
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher();
 
+	validateUtilityCommandFullScreenMode(args);
+
 	if (await handlePackageCommand(args, { extensionFactories: options?.extensionFactories })) {
 		const exitCode = process.exitCode ?? 0;
 		if (process.platform === "win32" && exitCode === 0 && args[0] === "update") {
@@ -516,6 +571,8 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	time("parseArgs");
+
+	validateFullScreenMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
 
 	if (parsed.version) {
 		console.log(VERSION);
@@ -819,6 +876,7 @@ export async function main(args: string[], options?: MainOptions) {
 			initialMessage,
 			initialImages,
 			initialMessages: parsed.messages,
+			screenMode: parsed.fullScreenMode ? "full-screen" : "scrollback",
 			verbose: parsed.verbose,
 		});
 		if (startupBenchmark) {

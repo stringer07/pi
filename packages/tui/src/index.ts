@@ -107,8 +107,12 @@ export {
 	type OverlayMargin,
 	type OverlayOptions,
 	type OverlayUnfocusOptions,
+	type ScreenMode,
+	type ScreenRegion,
 	type SizeValue,
 	TUI,
+	type TUIChildOptions,
+	type TUIOptions,
 } from "./tui.ts";
 // Utilities
 export { sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.ts";

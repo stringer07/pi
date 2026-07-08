@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+const tsxImport = import.meta.resolve("tsx");
+
 /**
  * Regression test for https://github.com/earendil-works/pi-mono/issues/2791
  *
@@ -87,7 +89,7 @@ process.exit(0);
 		let stderr = "";
 		let exitCode: number;
 		try {
-			_stdout = execFileSync(process.execPath, [scriptPath], {
+			_stdout = execFileSync(process.execPath, ["--import", tsxImport, scriptPath], {
 				timeout: 10000,
 				encoding: "utf-8",
 				env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },

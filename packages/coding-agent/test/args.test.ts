@@ -1,5 +1,9 @@
-import { describe, expect, test } from "vitest";
-import { parseArgs } from "../src/cli/args.ts";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { parseArgs, printHelp } from "../src/cli/args.ts";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("parseArgs", () => {
 	describe("--version flag", () => {
@@ -322,6 +326,14 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--full-screen-mode flag", () => {
+		test("parses --full-screen-mode as a built-in flag", () => {
+			const result = parseArgs(["--full-screen-mode"]);
+			expect(result.fullScreenMode).toBe(true);
+			expect(result.unknownFlags.size).toBe(0);
+		});
+	});
+
 	describe("--offline flag", () => {
 		test("parses --offline flag", () => {
 			const result = parseArgs(["--offline"]);
@@ -436,6 +448,18 @@ describe("parseArgs", () => {
 			expect(result.thinking).toBe("high");
 			expect(result.fileArgs).toEqual(["prompt.md"]);
 			expect(result.messages).toEqual(["Do the task"]);
+		});
+	});
+
+	describe("printHelp", () => {
+		test("documents --full-screen-mode as interactive-only", () => {
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+			printHelp();
+
+			const output = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(output).toContain("--full-screen-mode");
+			expect(output).toContain("interactive only");
 		});
 	});
 });

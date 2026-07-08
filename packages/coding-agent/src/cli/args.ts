@@ -46,6 +46,7 @@ export interface Args {
 	listModels?: string | true;
 	offline?: boolean;
 	verbose?: boolean;
+	fullScreenMode?: boolean;
 	projectTrustOverride?: boolean;
 	messages: string[];
 	fileArgs: string[];
@@ -177,6 +178,8 @@ export function parseArgs(args: string[]): Args {
 			}
 		} else if (arg === "--verbose") {
 			result.verbose = true;
+		} else if (arg === "--full-screen-mode") {
+			result.fullScreenMode = true;
 		} else if (arg === "--approve" || arg === "-a") {
 			result.projectTrustOverride = true;
 		} else if (arg === "--no-approve" || arg === "-na") {
@@ -241,6 +244,7 @@ ${chalk.bold("Options:")}
   --system-prompt <text>         System prompt (default: coding assistant prompt)
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
   --mode <mode>                  Output mode: text (default), json, or rpc
+  --full-screen-mode             Start interactive TUI in Full-screen mode (interactive only)
   --print, -p                    Non-interactive mode: process prompt and exit
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume
@@ -285,6 +289,9 @@ ${chalk.bold("Examples:")}
 
   # Interactive mode with initial prompt
   ${APP_NAME} "List all .ts files in src/"
+
+  # Interactive Full-screen mode
+  ${APP_NAME} --full-screen-mode
 
   # Include files in initial message
   ${APP_NAME} @prompt.md @image.png "What color is the sky?"

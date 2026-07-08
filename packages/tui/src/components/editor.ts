@@ -268,6 +268,7 @@ export class Editor implements Component, Focusable {
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
+	private manualScrollActive = false;
 
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
@@ -486,11 +487,13 @@ export class Editor implements Component, Focusable {
 		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
 		if (cursorLineIndex === -1) cursorLineIndex = 0;
 
-		// Adjust scroll offset to keep cursor visible
-		if (cursorLineIndex < this.scrollOffset) {
-			this.scrollOffset = cursorLineIndex;
-		} else if (cursorLineIndex >= this.scrollOffset + maxVisibleLines) {
-			this.scrollOffset = cursorLineIndex - maxVisibleLines + 1;
+		if (!this.manualScrollActive) {
+			// Adjust scroll offset to keep cursor visible
+			if (cursorLineIndex < this.scrollOffset) {
+				this.scrollOffset = cursorLineIndex;
+			} else if (cursorLineIndex >= this.scrollOffset + maxVisibleLines) {
+				this.scrollOffset = cursorLineIndex - maxVisibleLines + 1;
+			}
 		}
 
 		// Clamp scroll offset to valid range
@@ -995,6 +998,18 @@ export class Editor implements Component, Focusable {
 		return { line: this.state.cursorLine, col: this.state.cursorCol };
 	}
 
+	scrollViewUp(lines = 1): boolean {
+		return this.scrollViewBy(-Math.max(1, Math.floor(lines)));
+	}
+
+	scrollViewDown(lines = 1): boolean {
+		return this.scrollViewBy(Math.max(1, Math.floor(lines)));
+	}
+
+	protected isBrowsingHistory(): boolean {
+		return this.historyIndex > -1;
+	}
+
 	setText(text: string): void {
 		this.cancelAutocomplete();
 		this.lastAction = null;
@@ -1350,6 +1365,26 @@ export class Editor implements Component, Focusable {
 		this.state.cursorCol = col;
 		this.preferredVisualCol = null;
 		this.snappedFromCursorCol = null;
+		this.manualScrollActive = false;
+	}
+
+	private scrollViewBy(delta: number): boolean {
+		const maxVisibleLines = Math.max(5, Math.floor(this.tui.terminal.rows * 0.3));
+		const layoutLines = this.layoutText(this.lastWidth);
+		const maxScrollOffset = Math.max(0, layoutLines.length - maxVisibleLines);
+		if (maxScrollOffset === 0) {
+			return false;
+		}
+
+		const nextScrollOffset = Math.max(0, Math.min(maxScrollOffset, this.scrollOffset + delta));
+		if (nextScrollOffset === this.scrollOffset) {
+			return false;
+		}
+
+		this.scrollOffset = nextScrollOffset;
+		this.manualScrollActive = true;
+		this.tui.requestRender();
+		return true;
 	}
 
 	/**

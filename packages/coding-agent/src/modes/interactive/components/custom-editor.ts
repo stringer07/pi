@@ -1,4 +1,4 @@
-import { Editor, type EditorOptions, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
+import { Editor, type EditorOptions, type EditorTheme, getKeybindings, type TUI } from "@earendil-works/pi-tui";
 import type { AppKeybinding, KeybindingsManager } from "../../../core/keybindings.ts";
 
 /**
@@ -7,6 +7,7 @@ import type { AppKeybinding, KeybindingsManager } from "../../../core/keybinding
 export class CustomEditor extends Editor {
 	private keybindings: KeybindingsManager;
 	public actionHandlers: Map<AppKeybinding, () => void> = new Map();
+	public onScrollHandoff?: (direction: "up" | "down") => void;
 
 	// Special handlers that can be dynamically replaced
 	public onEscape?: () => void;
@@ -36,6 +37,10 @@ export class CustomEditor extends Editor {
 		// Check for paste image keybinding
 		if (this.keybindings.matches(data, "app.clipboard.pasteImage")) {
 			this.onPasteImage?.();
+			return;
+		}
+
+		if (this.handleBuiltInScrollHandoff(data)) {
 			return;
 		}
 
@@ -76,5 +81,45 @@ export class CustomEditor extends Editor {
 
 		// Pass to parent for editor handling
 		super.handleInput(data);
+	}
+
+	private handleBuiltInScrollHandoff(data: string): boolean {
+		if (!this.onScrollHandoff) {
+			return false;
+		}
+
+		const tuiKeybindings = getKeybindings();
+		const direction = tuiKeybindings.matches(data, "tui.editor.cursorUp")
+			? "up"
+			: tuiKeybindings.matches(data, "tui.editor.cursorDown")
+				? "down"
+				: undefined;
+		if (!direction) {
+			return false;
+		}
+
+		if (this.isShowingAutocomplete()) {
+			super.handleInput(data);
+			return true;
+		}
+
+		const beforeText = this.getText();
+		const beforeCursor = this.getCursor();
+		const wasBrowsingHistory = this.isBrowsingHistory();
+
+		super.handleInput(data);
+
+		const afterCursor = this.getCursor();
+		const handledLocally =
+			beforeText !== this.getText() ||
+			beforeCursor.line !== afterCursor.line ||
+			beforeCursor.col !== afterCursor.col ||
+			wasBrowsingHistory !== this.isBrowsingHistory();
+
+		if (!handledLocally) {
+			this.onScrollHandoff(direction);
+		}
+
+		return true;
 	}
 }

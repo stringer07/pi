@@ -15,6 +15,8 @@ The interface has four main areas:
 
 The editor can be replaced temporarily by built-in UI such as `/settings` or by custom extension UI.
 
+For the fixed-screen interactive layout, see [Full-screen mode](full-screen-mode.md).
+
 ### Editor Features
 
 | Feature | How |
@@ -165,6 +167,7 @@ See [Pi Packages](packages.md) for package sources and security notes.
 | Flag | Description |
 |------|-------------|
 | default | Interactive mode |
+| `--full-screen-mode` | Interactive TUI in Full-screen mode; see [Full-screen mode](full-screen-mode.md) |
 | `-p`, `--print` | Print response and exit |
 | `--mode json` | Output all events as JSON lines; see [JSON mode](json.md) |
 | `--mode rpc` | RPC mode over stdin/stdout; see [RPC mode](rpc.md) |

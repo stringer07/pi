@@ -26,6 +26,7 @@ import type {
 	MarkdownTheme,
 	OverlayHandle,
 	OverlayOptions,
+	ScreenMode,
 	SlashCommand,
 } from "@earendil-works/pi-tui";
 import {
@@ -202,6 +203,13 @@ function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionE
 }
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
+const FULL_SCREEN_MESSAGE_VIEWPORT_ACTIONS = new Set<AppKeybinding>([
+	"app.messageViewport.pageUp",
+	"app.messageViewport.pageDown",
+	"app.messageViewport.jumpToBottom",
+	"app.messageViewport.scrollUp",
+	"app.messageViewport.scrollDown",
+]);
 
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
@@ -335,6 +343,8 @@ export interface InteractiveModeOptions {
 	initialImages?: ImageContent[];
 	/** Additional messages to send after the initial message */
 	initialMessages?: string[];
+	/** Screen mode for the interactive TUI */
+	screenMode?: ScreenMode;
 	/** Force verbose startup (overrides quietStartup setting) */
 	verbose?: boolean;
 }
@@ -421,6 +431,7 @@ export class InteractiveMode {
 
 	// Shutdown state
 	private shutdownRequested = false;
+	private ignoreProcessSigint = false;
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -475,7 +486,9 @@ export class InteractiveMode {
 			await this.rebindCurrentSession({ renderBeforeBind: true });
 		});
 		this.version = VERSION;
-		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
+		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor(), {
+			screenMode: options.screenMode,
+		});
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.loadedResourcesContainer = new Container();
@@ -486,6 +499,7 @@ export class InteractiveMode {
 		this.widgetContainerBelow = new Container();
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
+		this.updateFullScreenMessageViewportHintState();
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
 		const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
@@ -725,17 +739,17 @@ export class InteractiveMode {
 
 		// Add header container as first child. Populate it after applying theme settings.
 		// Keep loaded resources before chat so restored session messages never precede them.
-		this.ui.addChild(this.headerContainer);
-		this.ui.addChild(this.loadedResourcesContainer);
+		this.ui.addChild(this.headerContainer, { region: "message-viewport" });
+		this.ui.addChild(this.loadedResourcesContainer, { region: "message-viewport" });
 
-		this.ui.addChild(this.chatContainer);
-		this.ui.addChild(this.pendingMessagesContainer);
-		this.ui.addChild(this.statusContainer);
+		this.ui.addChild(this.chatContainer, { region: "message-viewport" });
+		this.ui.addChild(this.pendingMessagesContainer, { region: "composer-region" });
+		this.ui.addChild(this.statusContainer, { region: "composer-region" });
 		this.renderWidgets(); // Initialize with default spacer
-		this.ui.addChild(this.widgetContainerAbove);
-		this.ui.addChild(this.editorContainer);
-		this.ui.addChild(this.widgetContainerBelow);
-		this.ui.addChild(this.footer);
+		this.ui.addChild(this.widgetContainerAbove, { region: "composer-region" });
+		this.ui.addChild(this.editorContainer, { region: "composer-region" });
+		this.ui.addChild(this.widgetContainerBelow, { region: "composer-region" });
+		this.ui.addChild(this.footer, { region: "composer-region" });
 		this.ui.setFocus(this.editor);
 
 		this.setupKeyHandlers();
@@ -842,6 +856,19 @@ export class InteractiveMode {
 		} else {
 			this.ui.terminal.setTitle(`${APP_TITLE} - ${cwdBasename}`);
 		}
+	}
+
+	private isFullScreenMode(): boolean {
+		return this.ui.getScreenMode() === "full-screen";
+	}
+
+	private updateFullScreenMessageViewportHintState(): void {
+		if (this.ui.getScreenMode() !== "full-screen") {
+			return;
+		}
+		this.ui.setFullScreenMessageViewportJumpToBottomKeyDisplay(
+			this.getAppKeyDisplay("app.messageViewport.jumpToBottom"),
+		);
 	}
 
 	/**
@@ -2039,11 +2066,11 @@ export class InteractiveMode {
 		if (factory) {
 			// Create and add custom footer, passing the data provider
 			this.customFooter = factory(this.ui, theme, this.footerDataProvider);
-			this.ui.addChild(this.customFooter);
+			this.ui.addChild(this.customFooter, { region: "composer-region" });
 		} else {
 			// Restore built-in footer
 			this.customFooter = undefined;
-			this.ui.addChild(this.footer);
+			this.ui.addChild(this.footer, { region: "composer-region" });
 		}
 
 		this.ui.requestRender();
@@ -2405,8 +2432,12 @@ export class InteractiveMode {
 				if (!customEditor.onExtensionShortcut) {
 					customEditor.onExtensionShortcut = (data: string) => this.defaultEditor.onExtensionShortcut?.(data);
 				}
-				// Copy action handlers (clear, suspend, model switching, etc.)
+				// Copy shared app handlers, but leave Full-screen viewport navigation
+				// to the built-in editor so extension editors keep their own key behavior.
 				for (const [action, handler] of this.defaultEditor.actionHandlers) {
+					if (FULL_SCREEN_MESSAGE_VIEWPORT_ACTIONS.has(action)) {
+						continue;
+					}
 					(customEditor.actionHandlers as Map<string, () => void>).set(action, handler);
 				}
 			}
@@ -2591,6 +2622,25 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
 		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
 		this.defaultEditor.onAction("app.session.resume", () => this.showSessionSelector());
+		this.defaultEditor.onScrollHandoff = undefined;
+		if (this.ui.getScreenMode() === "full-screen") {
+			this.ui.setFullScreenPointerScrollTarget(this.defaultEditor, {
+				scrollUp: () => this.defaultEditor.scrollViewUp(),
+				scrollDown: () => this.defaultEditor.scrollViewDown(),
+			});
+			this.defaultEditor.onAction("app.messageViewport.pageUp", () => this.ui.pageMessageViewportUp());
+			this.defaultEditor.onAction("app.messageViewport.pageDown", () => this.ui.pageMessageViewportDown());
+			this.defaultEditor.onAction("app.messageViewport.jumpToBottom", () => this.ui.jumpMessageViewportToBottom());
+			this.defaultEditor.onAction("app.messageViewport.scrollUp", () => this.ui.scrollMessageViewportUp());
+			this.defaultEditor.onAction("app.messageViewport.scrollDown", () => this.ui.scrollMessageViewportDown());
+			this.defaultEditor.onScrollHandoff = (direction: "up" | "down") => {
+				if (direction === "up") {
+					this.ui.scrollMessageViewportUp();
+					return;
+				}
+				this.ui.scrollMessageViewportDown();
+			};
+		}
 
 		this.defaultEditor.onChange = (text: string) => {
 			const wasBashMode = this.isBashMode;
@@ -2807,6 +2857,9 @@ export class InteractiveMode {
 			// Normal message submission
 			// First, move any pending bash components to chat
 			this.flushPendingBashComponents();
+			if (this.ui.getScreenMode() === "full-screen") {
+				this.ui.jumpMessageViewportToBottom();
+			}
 
 			if (this.onInputCallback) {
 				this.onInputCallback(text);
@@ -3427,6 +3480,9 @@ export class InteractiveMode {
 			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
 			this.showStatus(`Session compacted ${times}`);
 		}
+		if (this.isFullScreenMode()) {
+			this.ui.jumpMessageViewportToBottom();
+		}
 	}
 
 	private renderProjectTrustWarningIfNeeded(): void {
@@ -3555,7 +3611,10 @@ export class InteractiveMode {
 	 * call ui.stop() to restore cooked mode, the cursor, and disable bracketed
 	 * paste / Kitty / modifyOtherKeys sequences.
 	 */
-	private uncaughtCrash(error: Error): never {
+	private uncaughtCrash(
+		error: Error,
+		source: "uncaughtException" | "unhandledRejection" = "uncaughtException",
+	): never {
 		if (this.isShuttingDown) {
 			process.exit(1);
 		}
@@ -3569,7 +3628,7 @@ export class InteractiveMode {
 		try {
 			this.ui.stop();
 		} catch {}
-		console.error("pi exiting due to uncaughtException:");
+		console.error(`pi exiting due to ${source}:`);
 		console.error(error);
 		process.exit(1);
 	}
@@ -3585,13 +3644,16 @@ export class InteractiveMode {
 	private registerSignalHandlers(): void {
 		this.unregisterSignalHandlers();
 
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
+		const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
 		if (process.platform !== "win32") {
 			signals.push("SIGHUP");
 		}
 
 		for (const signal of signals) {
 			const handler = () => {
+				if (signal === "SIGINT" && this.ignoreProcessSigint) {
+					return;
+				}
 				// SIGHUP no longer hard-exits: graceful shutdown emits session_shutdown
 				// first, then attempts terminal restore. A genuinely dead terminal
 				// surfaces as an EIO on the restore writes, which the stdout/stderr
@@ -3620,6 +3682,13 @@ export class InteractiveMode {
 		const uncaughtExceptionHandler = (error: Error) => this.uncaughtCrash(error);
 		process.prependListener("uncaughtException", uncaughtExceptionHandler);
 		this.signalCleanupHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
+
+		const unhandledRejectionHandler = (reason: unknown) => {
+			const error = reason instanceof Error ? reason : new Error(`Unhandled rejection: ${String(reason)}`);
+			this.uncaughtCrash(error, "unhandledRejection");
+		};
+		process.prependListener("unhandledRejection", unhandledRejectionHandler);
+		this.signalCleanupHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
 	}
 
 	private unregisterSignalHandlers(): void {
@@ -3643,12 +3712,14 @@ export class InteractiveMode {
 		// Ignore SIGINT while suspended so Ctrl+C in the terminal does not
 		// kill the backgrounded process. The handler is removed on resume.
 		const ignoreSigint = () => {};
+		this.ignoreProcessSigint = true;
 		process.on("SIGINT", ignoreSigint);
 
 		// Set up handler to restore TUI when resumed
 		process.once("SIGCONT", () => {
 			clearInterval(suspendKeepAlive);
 			process.removeListener("SIGINT", ignoreSigint);
+			this.ignoreProcessSigint = false;
 			this.ui.start();
 			this.ui.requestRender(true);
 		});
@@ -3662,6 +3733,7 @@ export class InteractiveMode {
 		} catch (error) {
 			clearInterval(suspendKeepAlive);
 			process.removeListener("SIGINT", ignoreSigint);
+			this.ignoreProcessSigint = false;
 			throw error;
 		}
 	}
@@ -5340,6 +5412,7 @@ export class InteractiveMode {
 			restoreChatBeforeSessionStart();
 			configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
 			this.keybindings.reload();
+			this.updateFullScreenMessageViewportHintState();
 			const activeHeader = this.customHeader ?? this.builtInHeader;
 			if (isExpandable(activeHeader)) {
 				activeHeader.setExpanded(this.toolOutputExpanded);

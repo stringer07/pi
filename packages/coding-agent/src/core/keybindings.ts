@@ -25,6 +25,11 @@ export interface AppKeybindings {
 	"app.editor.external": true;
 	"app.message.followUp": true;
 	"app.message.dequeue": true;
+	"app.messageViewport.pageUp": true;
+	"app.messageViewport.pageDown": true;
+	"app.messageViewport.jumpToBottom": true;
+	"app.messageViewport.scrollUp": true;
+	"app.messageViewport.scrollDown": true;
 	"app.clipboard.pasteImage": true;
 	"app.session.new": true;
 	"app.session.tree": true;
@@ -102,6 +107,26 @@ export const KEYBINDINGS = {
 	"app.message.dequeue": {
 		defaultKeys: "alt+up",
 		description: "Restore queued messages",
+	},
+	"app.messageViewport.pageUp": {
+		defaultKeys: "pageUp",
+		description: "Page up in Full-screen Message viewport",
+	},
+	"app.messageViewport.pageDown": {
+		defaultKeys: "pageDown",
+		description: "Page down in Full-screen Message viewport",
+	},
+	"app.messageViewport.jumpToBottom": {
+		defaultKeys: "ctrl+down",
+		description: "Jump to bottom of Full-screen Message viewport",
+	},
+	"app.messageViewport.scrollUp": {
+		defaultKeys: [],
+		description: "Scroll up in Full-screen Message viewport",
+	},
+	"app.messageViewport.scrollDown": {
+		defaultKeys: [],
+		description: "Scroll down in Full-screen Message viewport",
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: process.platform === "win32" ? "alt+v" : "ctrl+v",
@@ -247,6 +272,11 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	externalEditor: "app.editor.external",
 	followUp: "app.message.followUp",
 	dequeue: "app.message.dequeue",
+	messageViewportPageUp: "app.messageViewport.pageUp",
+	messageViewportPageDown: "app.messageViewport.pageDown",
+	messageViewportJumpToBottom: "app.messageViewport.jumpToBottom",
+	messageViewportScrollUp: "app.messageViewport.scrollUp",
+	messageViewportScrollDown: "app.messageViewport.scrollDown",
 	pasteImage: "app.clipboard.pasteImage",
 	newSession: "app.session.new",
 	tree: "app.session.tree",
