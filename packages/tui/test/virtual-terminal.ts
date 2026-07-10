@@ -164,6 +164,32 @@ export class VirtualTerminal implements Terminal {
 		return lines;
 	}
 
+	getCellStyle(
+		row: number,
+		col: number,
+	):
+		| {
+				chars: string;
+				fgColorMode: number;
+				bgColorMode: number;
+				fgColor: number;
+				bgColor: number;
+				inverse: number;
+		  }
+		| undefined {
+		const buffer = this.xterm.buffer.active;
+		const cell = buffer.getLine(buffer.viewportY + row)?.getCell(col);
+		if (!cell) return undefined;
+		return {
+			chars: cell.getChars(),
+			fgColorMode: cell.getFgColorMode(),
+			bgColorMode: cell.getBgColorMode(),
+			fgColor: cell.getFgColor(),
+			bgColor: cell.getBgColor(),
+			inverse: cell.isInverse(),
+		};
+	}
+
 	/**
 	 * Get the entire scroll buffer
 	 */

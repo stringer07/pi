@@ -38,6 +38,20 @@ class MutableLines implements Component {
 	invalidate(): void {}
 }
 
+class WidthAwareLines implements Component {
+	private readonly lineCount: number;
+
+	constructor(lineCount: number) {
+		this.lineCount = lineCount;
+	}
+
+	render(width: number): string[] {
+		return Array.from({ length: this.lineCount }, () => "x".repeat(width));
+	}
+
+	invalidate(): void {}
+}
+
 class LoggingVirtualTerminal extends VirtualTerminal {
 	private writes: string[] = [];
 
@@ -332,13 +346,7 @@ describe("TUI Screen mode seam", () => {
 
 		assert.strictEqual(tui.pageMessageViewportUp(), true);
 		await terminal.waitForRender();
-		assert.deepStrictEqual(terminal.getViewport(), [
-			"message 1",
-			"message 2",
-			"message 3 · ↓ Newer below",
-			"editor",
-			"footer",
-		]);
+		assert.deepStrictEqual(terminal.getViewport(), ["message 1", "message 2", "message 3", "editor", "footer"]);
 
 		assert.strictEqual(tui.pageMessageViewportDown(), true);
 		await terminal.waitForRender();
@@ -349,6 +357,96 @@ describe("TUI Screen mode seam", () => {
 		assert.strictEqual(tui.jumpMessageViewportToBottom(), true);
 		await terminal.waitForRender();
 		assert.deepStrictEqual(terminal.getViewport(), ["message 3", "message 4", "message 5", "editor", "footer"]);
+
+		tui.stop();
+	});
+
+	it("reserves a right column for a Full-screen Message viewport scrollbar", async () => {
+		const terminal = new VirtualTerminal(10, 6);
+		const tui = new TUI(terminal, undefined, {
+			screenMode: "full-screen",
+			fullScreenMessageViewportScrollbar: true,
+		});
+
+		tui.addChild(new WidthAwareLines(8), { region: "message-viewport" });
+		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		assert.deepStrictEqual(terminal.getViewport(), [
+			"xxxxxxxxx█",
+			"xxxxxxxxx█",
+			"xxxxxxxxx█",
+			"xxxxxxxxx█",
+			"editor",
+			"footer",
+		]);
+
+		assert.strictEqual(tui.pageMessageViewportUp(), true);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(
+			terminal
+				.getViewport()
+				.slice(0, 4)
+				.map((line) => line.slice(-1)),
+			["█", "█", "█", "█"],
+		);
+
+		tui.stop();
+	});
+
+	it("updates the Full-screen Message viewport scrollbar after a single-line scroll", async () => {
+		const terminal = new VirtualTerminal(10, 6);
+		const tui = new TUI(terminal, undefined, {
+			screenMode: "full-screen",
+			fullScreenMessageViewportScrollbar: true,
+		});
+
+		tui.addChild(new WidthAwareLines(12), { region: "message-viewport" });
+		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		const initialScrollbar = terminal
+			.getViewport()
+			.slice(0, 4)
+			.map((line) => line.slice(-1))
+			.join("");
+		assert.strictEqual(initialScrollbar, "██▃█");
+
+		assert.strictEqual(tui.scrollMessageViewportUp(), true);
+		await terminal.waitForRender();
+		const scrolledScrollbar = terminal
+			.getViewport()
+			.slice(0, 4)
+			.map((line) => line.slice(-1))
+			.join("");
+
+		assert.strictEqual(scrolledScrollbar, "██▆▃");
+
+		tui.stop();
+	});
+
+	it("hides the Full-screen Message viewport scrollbar when all messages fit", async () => {
+		const terminal = new VirtualTerminal(10, 6);
+		const tui = new TUI(terminal, undefined, {
+			screenMode: "full-screen",
+			fullScreenMessageViewportScrollbar: true,
+		});
+
+		tui.addChild(new WidthAwareLines(4), { region: "message-viewport" });
+		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		assert.deepStrictEqual(terminal.getViewport(), [
+			"xxxxxxxxx",
+			"xxxxxxxxx",
+			"xxxxxxxxx",
+			"xxxxxxxxx",
+			"editor",
+			"footer",
+		]);
 
 		tui.stop();
 	});
@@ -386,13 +484,7 @@ describe("TUI Screen mode seam", () => {
 		await terminal.waitForRender();
 		assert.strictEqual(tui.pageMessageViewportUp(), true);
 		await terminal.waitForRender();
-		assert.deepStrictEqual(terminal.getViewport(), [
-			"message 1",
-			"message 2",
-			"message 3 · ↓ Newer below",
-			"editor",
-			"footer",
-		]);
+		assert.deepStrictEqual(terminal.getViewport(), ["message 1", "message 2", "message 3", "editor", "footer"]);
 
 		messages.setLines(["message 1", "message 2", "message 3", "message 4", "message 5", "message 6", "message 7"]);
 		tui.requestRender();
@@ -418,13 +510,7 @@ describe("TUI Screen mode seam", () => {
 		await terminal.waitForRender();
 		assert.strictEqual(tui.pageMessageViewportUp(), true);
 		await terminal.waitForRender();
-		assert.deepStrictEqual(terminal.getViewport(), [
-			"message 1",
-			"message 2",
-			"message 3 · ↓ Newer below",
-			"editor",
-			"footer",
-		]);
+		assert.deepStrictEqual(terminal.getViewport(), ["message 1", "message 2", "message 3", "editor", "footer"]);
 
 		messages.setLines(["message 1", "message 2", "message 3", "streaming updated", "message 5"]);
 		tui.requestRender();
@@ -466,7 +552,7 @@ describe("TUI Screen mode seam", () => {
 		tui.stop();
 	});
 
-	it("shows older and newer boundary hints only while scrolled away from the live bottom", async () => {
+	it("does not show Message viewport boundary hints while scrolled away from the live bottom", async () => {
 		const terminal = new VirtualTerminal(50, 5);
 		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
 
@@ -491,9 +577,9 @@ describe("TUI Screen mode seam", () => {
 
 		assert.strictEqual(tui.pageMessageViewportUp(), true);
 		await terminal.waitForRender();
-		assert.strictEqual(terminal.getViewport()[0], "↑ Older above · message 3");
+		assert.strictEqual(terminal.getViewport()[0], "message 3");
 		assert.strictEqual(terminal.getViewport()[1], "message 4");
-		assert.strictEqual(terminal.getViewport()[2], "message 5 · ↓ Newer below");
+		assert.strictEqual(terminal.getViewport()[2], "message 5");
 
 		tui.stop();
 	});
@@ -636,12 +722,7 @@ describe("TUI Screen mode seam", () => {
 
 		terminal.sendInput(wheelOverMessageViewport);
 		await terminal.waitForRender();
-		assert.deepStrictEqual(terminal.getViewport().slice(0, 4), [
-			"↑ Older above · message 2",
-			"message 3",
-			"message 4",
-			"message 5 · ↓ Newer below",
-		]);
+		assert.deepStrictEqual(terminal.getViewport().slice(0, 4), ["message 2", "message 3", "message 4", "message 5"]);
 
 		terminal.sendInput(wheelOverEditor);
 		await terminal.waitForRender();
@@ -693,7 +774,7 @@ describe("TUI Screen mode seam", () => {
 			"message 3",
 			"message 4",
 			"message 5",
-			"message 6 · ↓ Newer below",
+			"message 6",
 		]);
 
 		terminal.sendInput("\x1b[<0;1;2M");
@@ -702,6 +783,115 @@ describe("TUI Screen mode seam", () => {
 		await terminal.waitForRender();
 
 		assert.deepStrictEqual(selectedTexts, ["message 2"]);
+
+		tui.stop();
+	});
+
+	it("keeps a partially spanned CJK character visible and selected", async () => {
+		const terminal = new VirtualTerminal(10, 2);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen", fullScreenMouseReporting: true });
+		const selectedTexts: string[] = [];
+
+		tui.setFullScreenSelectionHandler((text) => {
+			selectedTexts.push(text);
+		});
+		tui.addChild(new Lines(["中文"]), { region: "message-viewport" });
+		tui.addChild(new Lines(["editor"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;3;1M");
+		await terminal.waitForRender();
+
+		assert.strictEqual(terminal.getViewport()[0], "中文");
+
+		terminal.sendInput("\x1b[<0;3;1m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(selectedTexts, ["中文"]);
+
+		tui.stop();
+	});
+
+	it("excludes the Message viewport scrollbar from copied selections", async () => {
+		const terminal = new VirtualTerminal(10, 4);
+		const tui = new TUI(terminal, undefined, {
+			screenMode: "full-screen",
+			fullScreenMouseReporting: true,
+			fullScreenMessageViewportScrollbar: true,
+		});
+		const selectedTexts: string[] = [];
+
+		tui.setFullScreenSelectionHandler((text) => {
+			selectedTexts.push(text);
+		});
+		tui.addChild(new WidthAwareLines(6), { region: "message-viewport" });
+		tui.addChild(new Lines(["editor"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;10;1M");
+		terminal.sendInput("\x1b[<0;10;1m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(selectedTexts, ["xxxxxxxxx"]);
+
+		tui.stop();
+	});
+
+	it("keeps Message viewport scrollbar styling isolated from selections", async () => {
+		const terminal = new VirtualTerminal(10, 6);
+		const tui = new TUI(terminal, undefined, {
+			screenMode: "full-screen",
+			fullScreenMouseReporting: true,
+			fullScreenMessageViewportScrollbar: true,
+		});
+
+		tui.addChild(new Lines(Array.from({ length: 12 }, () => `\x1b[32m${"x".repeat(9)}`)), {
+			region: "message-viewport",
+		});
+		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		const scrollbarBeforeSelection = Array.from({ length: 4 }, (_, row) => terminal.getCellStyle(row, 9));
+		assert.deepStrictEqual(
+			scrollbarBeforeSelection.map((cell) => cell?.bgColor),
+			[238, 238, 238, 245],
+		);
+		assert.deepStrictEqual(
+			scrollbarBeforeSelection.map((cell) => cell?.inverse),
+			[0, 0, 0, 0],
+		);
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;10;4M");
+		await terminal.waitForRender();
+		const scrollbarDuringSelection = Array.from({ length: 4 }, (_, row) => terminal.getCellStyle(row, 9));
+
+		assert.deepStrictEqual(scrollbarDuringSelection, scrollbarBeforeSelection);
+
+		tui.stop();
+	});
+
+	it("keeps the selection background across styled content resets", async () => {
+		const terminal = new VirtualTerminal(20, 2);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen", fullScreenMouseReporting: true });
+
+		tui.addChild(new Lines(["\x1b[32mtool \x1b[0moutput"]), { region: "message-viewport" });
+		tui.addChild(new Lines(["editor"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;11;1M");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(
+			Array.from({ length: 11 }, (_, col) => terminal.getCellStyle(0, col)?.bgColor),
+			Array<number>(11).fill(8),
+		);
 
 		tui.stop();
 	});

@@ -496,6 +496,7 @@ export class InteractiveMode {
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor(), {
 			screenMode: options.screenMode,
 			fullScreenMouseReporting: resolveFullScreenMouseReporting(options.screenMode),
+			fullScreenMessageViewportScrollbar: true,
 		});
 		this.ui.setFullScreenSelectionHandler((text) => {
 			void this.copyFullScreenSelection(text);

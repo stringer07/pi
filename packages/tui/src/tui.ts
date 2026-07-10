@@ -31,8 +31,11 @@ const ALTERNATE_SCREEN_ENABLE_SEQUENCE = "\x1b[?1049h";
 const ALTERNATE_SCREEN_DISABLE_SEQUENCE = "\x1b[?1049l";
 const MOUSE_REPORTING_ENABLE_SEQUENCE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 const MOUSE_REPORTING_DISABLE_SEQUENCE = "\x1b[?1002l\x1b[?1000l\x1b[?1006l";
-const SELECTION_ENABLE_SEQUENCE = "\x1b[7m";
-const SELECTION_DISABLE_SEQUENCE = "\x1b[27m";
+const SELECTION_ENABLE_SEQUENCE = "\x1b[48;5;8m";
+const SELECTION_DISABLE_SEQUENCE = "\x1b[49m";
+const SCROLLBAR_PARTIAL_BLOCKS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+const SCROLLBAR_TRACK_SEQUENCE = "\x1b[38;5;238;48;5;238m█\x1b[0m";
+const SCROLLBAR_THUMB_SEQUENCE = "\x1b[38;5;245;48;5;245m█\x1b[0m";
 
 interface KittyImageHeader {
 	ids: number[];
@@ -311,6 +314,7 @@ export interface TUIChildOptions {
 export interface TUIOptions {
 	screenMode?: ScreenMode;
 	fullScreenMouseReporting?: boolean;
+	fullScreenMessageViewportScrollbar?: boolean;
 }
 
 type FullScreenLayout = {
@@ -419,7 +423,10 @@ export class TUI extends Container {
 	private terminalColorSchemeNotificationsEnabled = false;
 	private readonly screenMode: ScreenMode;
 	private readonly fullScreenMouseReporting: boolean;
+	private readonly fullScreenMessageViewportScrollbar: boolean;
 	private readonly childRegions = new Map<Component, ScreenRegion>();
+	private fullScreenMessageViewportHeight = 0;
+	private fullScreenMessageViewportScrollbarLines: string[] = [];
 	private fullScreenMessageViewportDistanceFromBottom = 0;
 	private fullScreenMessageViewportLastMessageLineCount = 0;
 	private fullScreenMessageViewportLastMessageLines: string[] = [];
@@ -442,6 +449,7 @@ export class TUI extends Container {
 		this.terminal = terminal;
 		this.screenMode = options.screenMode ?? "scrollback";
 		this.fullScreenMouseReporting = options.fullScreenMouseReporting ?? false;
+		this.fullScreenMessageViewportScrollbar = options.fullScreenMessageViewportScrollbar ?? false;
 		if (showHardwareCursor !== undefined) {
 			this.showHardwareCursor = showHardwareCursor;
 		}
@@ -493,10 +501,13 @@ export class TUI extends Container {
 
 	private renderFullScreenMode(width: number): string[] {
 		if (this.childRegions.size === 0) {
+			this.fullScreenMessageViewportHeight = 0;
+			this.fullScreenMessageViewportScrollbarLines = [];
 			return super.render(width);
 		}
 
 		const layout = this.getFullScreenLayout(width, this.terminal.rows, { preserveHistoricalView: true });
+		this.fullScreenMessageViewportHeight = layout.messageViewportHeight;
 		this.fullScreenMessageViewportDistanceFromBottom = layout.messageViewportDistanceFromBottom;
 		this.fullScreenMessageViewportLastMessageLineCount = layout.totalMessageLines;
 		this.fullScreenMessageViewportLastMessageLines = layout.messageLines;
@@ -519,7 +530,8 @@ export class TUI extends Container {
 		height: number,
 		options: { preserveHistoricalView?: boolean } = {},
 	): FullScreenLayout {
-		const messageLines = this.renderChildren(this.getChildrenOutsideComposerRegion(), width);
+		const messageViewportWidth = this.fullScreenMessageViewportScrollbar && width > 1 ? width - 1 : width;
+		const messageLines = this.renderChildren(this.getChildrenOutsideComposerRegion(), messageViewportWidth);
 		const composerLines = this.renderChildren(this.getChildrenInScreenRegion("composer-region"), width);
 		const composerHeight = Math.min(height, composerLines.length);
 		const messageViewportHeight = Math.max(0, height - composerHeight);
@@ -562,6 +574,7 @@ export class TUI extends Container {
 				height,
 				messageViewportHeight,
 				messageViewportDistanceFromBottom,
+				messageViewportWidth,
 			),
 			messageLines,
 			messageViewportHeight,
@@ -597,7 +610,9 @@ export class TUI extends Container {
 		height: number,
 		messageViewportHeight: number,
 		messageViewportDistanceFromBottom: number,
+		messageViewportWidth: number,
 	): string[] {
+		this.fullScreenMessageViewportScrollbarLines = [];
 		if (height <= 0) {
 			return [];
 		}
@@ -615,14 +630,66 @@ export class TUI extends Container {
 			visibleMessageWindow,
 			messageViewportDistanceFromBottom,
 			messageLines.length,
-			width,
+			messageViewportWidth,
 		);
 		const boundaryMessageLines = this.trimTrailingMessageViewportBoundaryBlankLines(
 			visibleMessageLines,
 			messageViewportDistanceFromBottom,
 		);
 		const topPadding = Math.max(0, messageViewportHeight - boundaryMessageLines.length);
-		return [...Array<string>(topPadding).fill(""), ...boundaryMessageLines, ...composerLines];
+		const frameMessageLines = [...Array<string>(topPadding).fill(""), ...boundaryMessageLines];
+		return [
+			...this.decorateFullScreenMessageViewportScrollbar(
+				frameMessageLines,
+				messageViewportHeight,
+				messageLines.length,
+				visibleMessageWindow.start,
+				messageViewportWidth,
+				width,
+			),
+			...composerLines,
+		];
+	}
+
+	private decorateFullScreenMessageViewportScrollbar(
+		lines: string[],
+		messageViewportHeight: number,
+		totalMessageLines: number,
+		messageViewportStart: number,
+		messageViewportWidth: number,
+		width: number,
+	): string[] {
+		if (
+			!this.fullScreenMessageViewportScrollbar ||
+			messageViewportWidth === width ||
+			totalMessageLines <= messageViewportHeight
+		) {
+			return lines;
+		}
+
+		const thumbHeight = Math.max(1, (messageViewportHeight * messageViewportHeight) / totalMessageLines);
+		const maxThumbStart = messageViewportHeight - thumbHeight;
+		const maxMessageViewportStart = totalMessageLines - messageViewportHeight;
+		const thumbStart = (messageViewportStart / maxMessageViewportStart) * maxThumbStart;
+		const thumbEnd = thumbStart + thumbHeight;
+		const decoratedLines = lines.map((line, index) => {
+			const content = truncateToWidth(line, messageViewportWidth, "");
+			let scrollbar = SCROLLBAR_TRACK_SEQUENCE;
+			if (index === Math.floor(thumbStart)) {
+				const filledEighths = Math.floor((1 - (thumbStart - index)) * 8);
+				const partialBlock = SCROLLBAR_PARTIAL_BLOCKS[filledEighths] ?? "█";
+				scrollbar = `\x1b[38;5;245;48;5;238m${partialBlock}\x1b[0m`;
+			} else if (index === Math.floor(thumbEnd)) {
+				const unfilledEighths = Math.floor((1 - (thumbEnd - index)) * 8);
+				const partialBlock = SCROLLBAR_PARTIAL_BLOCKS[unfilledEighths] ?? "█";
+				scrollbar = `\x1b[38;5;238;48;5;245m${partialBlock}\x1b[0m`;
+			} else if (index > thumbStart && index < thumbEnd) {
+				scrollbar = SCROLLBAR_THUMB_SEQUENCE;
+			}
+			this.fullScreenMessageViewportScrollbarLines.push(scrollbar);
+			return `${content}${" ".repeat(messageViewportWidth - visibleWidth(content))}${scrollbar}`;
+		});
+		return decoratedLines;
 	}
 
 	private trimTrailingMessageViewportBoundaryBlankLines(
@@ -669,37 +736,26 @@ export class TUI extends Container {
 			return visibleMessageLines;
 		}
 
-		const topHint = window.start > 0 ? "↑ Older above" : undefined;
 		const bottomHint =
-			window.end < totalMessageLines
-				? this.fullScreenMessageViewportHasNewContentBelow
-					? this.getNewContentIndicatorText()
-					: "↓ Newer below"
+			window.end < totalMessageLines && this.fullScreenMessageViewportHasNewContentBelow
+				? this.getNewContentIndicatorText()
 				: undefined;
-		if (!topHint && !bottomHint) {
+		if (!bottomHint) {
 			return visibleMessageLines;
 		}
 
 		if (visibleMessageLines.length === 1) {
-			const hints = [topHint, bottomHint].filter((hint): hint is string => hint !== undefined);
-			visibleMessageLines[0] = this.decorateViewportHintLine(visibleMessageLines[0] ?? "", hints.join(" · "), width);
+			visibleMessageLines[0] = this.decorateViewportHintLine(visibleMessageLines[0] ?? "", bottomHint, width);
 			return visibleMessageLines;
 		}
 
-		if (topHint) {
-			visibleMessageLines[0] = this.decorateViewportHintLine(visibleMessageLines[0] ?? "", topHint, width, {
-				position: "prefix",
-			});
-		}
-		if (bottomHint) {
-			const lastIndex = visibleMessageLines.length - 1;
-			visibleMessageLines[lastIndex] = this.decorateViewportHintLine(
-				visibleMessageLines[lastIndex] ?? "",
-				bottomHint,
-				width,
-				{ position: "suffix" },
-			);
-		}
+		const lastIndex = visibleMessageLines.length - 1;
+		visibleMessageLines[lastIndex] = this.decorateViewportHintLine(
+			visibleMessageLines[lastIndex] ?? "",
+			bottomHint,
+			width,
+			{ position: "suffix" },
+		);
 
 		return visibleMessageLines;
 	}
@@ -1468,19 +1524,59 @@ export class TUI extends Container {
 		}
 
 		return lines.map((line, row) => {
-			const span = this.getSelectionSpanForRow(row, range, width);
+			const renderedScrollbar = this.fullScreenMessageViewportScrollbarLines[row];
+			const scrollbar = renderedScrollbar && line.endsWith(renderedScrollbar) ? renderedScrollbar : "";
+			const selectableLine = scrollbar ? sliceByColumn(line, 0, width - 1, true) : line;
+			const span = this.getSelectionSpanForLine(selectableLine, row, range, width);
 			if (!span) {
 				return line;
 			}
 			const selectedLength = span.end - span.start;
-			const before = sliceByColumn(line, 0, span.start, true);
-			const selected = sliceByColumn(line, span.start, selectedLength, true);
-			const after = sliceByColumn(line, span.end, width - span.end, true);
+			const selectableWidth = scrollbar ? width - 1 : width;
+			const before = sliceByColumn(selectableLine, 0, span.start, true);
+			const selected = sliceByColumn(selectableLine, span.start, selectedLength, true);
+			const after = sliceByColumn(selectableLine, span.end, selectableWidth - span.end, true);
 			if (visibleWidth(selected) === 0) {
 				return line;
 			}
-			return `${before}${SELECTION_ENABLE_SEQUENCE}${selected}${SELECTION_DISABLE_SEQUENCE}${after}`;
+			return `${before}${this.applyFullScreenSelectionStyle(selected)}${after}${scrollbar}`;
 		});
+	}
+
+	private applyFullScreenSelectionStyle(text: string): string {
+		let result = SELECTION_ENABLE_SEQUENCE;
+		let index = 0;
+		while (index < text.length) {
+			const ansi = extractAnsiCode(text, index);
+			if (ansi) {
+				result += ansi.code + SELECTION_ENABLE_SEQUENCE;
+				index += ansi.length;
+				continue;
+			}
+			result += text[index];
+			index++;
+		}
+		return result + SELECTION_DISABLE_SEQUENCE;
+	}
+
+	private getSelectionSpanForLine(
+		line: string,
+		row: number,
+		range: { start: FullScreenSelectionPoint; end: FullScreenSelectionPoint },
+		width: number,
+	): { start: number; end: number } | undefined {
+		const selectableWidth =
+			this.fullScreenMessageViewportScrollbar && width > 1 && row < this.fullScreenMessageViewportHeight
+				? width - 1
+				: width;
+		const selectionSpan = this.getSelectionSpanForRow(row, range, selectableWidth);
+		if (!selectionSpan) {
+			return undefined;
+		}
+
+		const start = visibleWidth(sliceByColumn(line, 0, selectionSpan.start, true));
+		const end = visibleWidth(sliceByColumn(line, 0, selectionSpan.end));
+		return start < end ? { start, end } : undefined;
 	}
 
 	private getSelectionSpanForRow(
@@ -1492,8 +1588,8 @@ export class TUI extends Container {
 			return undefined;
 		}
 
-		const start = row === range.start.row ? range.start.col : 0;
-		const end = row === range.end.row ? range.end.col + 1 : width;
+		const start = Math.min(row === range.start.row ? range.start.col : 0, width);
+		const end = Math.min(row === range.end.row ? range.end.col + 1 : width, width);
 		if (start >= end) {
 			return undefined;
 		}
@@ -1509,7 +1605,7 @@ export class TUI extends Container {
 		const lines: string[] = [];
 		for (let row = range.start.row; row <= range.end.row; row++) {
 			const line = this.fullScreenSelectionSourceLines[row] ?? "";
-			const span = this.getSelectionSpanForRow(row, range, this.terminal.columns);
+			const span = this.getSelectionSpanForLine(line, row, range, this.terminal.columns);
 			if (!span) {
 				continue;
 			}
