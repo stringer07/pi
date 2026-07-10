@@ -2,6 +2,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Editor } from "../src/components/editor.ts";
 import { type Component, type Focusable, TUI } from "../src/tui.ts";
+import { visibleWidth } from "../src/utils.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -107,6 +108,8 @@ describe("TUI Screen mode seam", () => {
 			"\x1b[?1003l",
 			"\x1b[?1006h",
 			"\x1b[?1006l",
+			"\x1b[?1007h",
+			"\x1b[?1007l",
 		]) {
 			assert.ok(!writes.includes(sequence), `Scrollback mode must not emit ${JSON.stringify(sequence)}`);
 		}
@@ -169,7 +172,7 @@ describe("TUI Screen mode seam", () => {
 		);
 	});
 
-	it("enables mouse reporting only while Full-screen mode is active", async () => {
+	it("does not enable pointer terminal protocols unless requested", async () => {
 		const terminal = new LoggingVirtualTerminal(40, 8);
 		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
 
@@ -181,10 +184,37 @@ describe("TUI Screen mode seam", () => {
 		tui.stop();
 
 		const writes = terminal.getWrites();
-		assert.ok(writes.includes("\x1b[?1000h"), "Full-screen mode must enable button mouse reporting");
-		assert.ok(writes.includes("\x1b[?1006h"), "Full-screen mode must enable SGR mouse reporting");
+		assert.ok(!writes.includes("\x1b[?1000h"), "Full-screen mode must not enable button mouse reporting by default");
+		assert.ok(!writes.includes("\x1b[?1006h"), "Full-screen mode must not enable SGR mouse reporting by default");
+		assert.ok(!writes.includes("\x1b[?1000l"), "Full-screen mode must not disable inactive button mouse reporting");
+		assert.ok(!writes.includes("\x1b[?1006l"), "Full-screen mode must not disable inactive SGR mouse reporting");
+		assert.ok(!writes.includes("\x1b[?1007h"), "Full-screen mode must not enable ambiguous alternate-scroll input");
+		assert.ok(!writes.includes("\x1b[?1007l"), "Full-screen mode must not disable inactive alternate-scroll");
+	});
+
+	it("enables mouse reporting only while requested Full-screen mode is active", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 8);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen", fullScreenMouseReporting: true });
+
+		tui.addChild(new Lines(["message"]), { region: "message-viewport" });
+		tui.addChild(new Lines(["editor"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		tui.stop();
+
+		const writes = terminal.getWrites();
+		assert.ok(writes.includes("\x1b[?1000h"), "Full-screen mode must enable button mouse reporting when requested");
+		assert.ok(writes.includes("\x1b[?1002h"), "Full-screen mode must enable drag mouse reporting when requested");
+		assert.ok(writes.includes("\x1b[?1006h"), "Full-screen mode must enable SGR mouse reporting when requested");
 		assert.ok(writes.includes("\x1b[?1000l"), "Full-screen mode must disable button mouse reporting on stop");
+		assert.ok(writes.includes("\x1b[?1002l"), "Full-screen mode must disable drag mouse reporting on stop");
 		assert.ok(writes.includes("\x1b[?1006l"), "Full-screen mode must disable SGR mouse reporting on stop");
+		assert.ok(
+			!writes.includes("\x1b[?1007h"),
+			"Full-screen mode must not enable alternate-scroll with mouse reporting",
+		);
+		assert.ok(!writes.includes("\x1b[?1007l"), "Full-screen mode must not disable inactive alternate-scroll");
 	});
 
 	it("restores Full-screen terminal state across stop/start cycles without resetting the historical Message viewport", async () => {
@@ -217,14 +247,7 @@ describe("TUI Screen mode seam", () => {
 		await terminal.flush();
 
 		const writes = terminal.getWrites();
-		for (const sequence of [
-			"\x1b[?1049h",
-			"\x1b[?1049l",
-			"\x1b[?1000h",
-			"\x1b[?1000l",
-			"\x1b[?1006h",
-			"\x1b[?1006l",
-		]) {
+		for (const sequence of ["\x1b[?1049h", "\x1b[?1049l"]) {
 			const count = writes.split(sequence).length - 1;
 			assert.strictEqual(count, 2, `Expected ${JSON.stringify(sequence)} twice across stop/start cycles`);
 		}
@@ -254,6 +277,21 @@ describe("TUI Screen mode seam", () => {
 			"editor",
 			"footer",
 		]);
+
+		tui.stop();
+	});
+
+	it("absorbs trailing blank Message viewport lines at the Composer region boundary", async () => {
+		const terminal = new VirtualTerminal(40, 6);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+
+		tui.addChild(new Lines(["message 1", "message 2", ""]), { region: "message-viewport" });
+		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(terminal.getViewport(), ["", "", "message 1", "message 2", "editor", "footer"]);
 
 		tui.stop();
 	});
@@ -403,6 +441,31 @@ describe("TUI Screen mode seam", () => {
 		tui.stop();
 	});
 
+	it("keeps the New content indicator visible when the boundary message fills the terminal width", async () => {
+		const terminal = new VirtualTerminal(50, 5);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+		const messages = new MutableLines(["message 1", "message 2", "x".repeat(50), "message 4", "message 5"]);
+
+		tui.setFullScreenMessageViewportJumpToBottomKeyDisplay("Ctrl+Down");
+		tui.addChild(messages, { region: "message-viewport" });
+		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(tui.pageMessageViewportUp(), true);
+		await terminal.waitForRender();
+
+		messages.setLines(["message 1", "message 2", "x".repeat(50), "message 4", "message 5", "message 6", "message 7"]);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const boundaryLine = terminal.getViewport()[2] ?? "";
+		assert.ok(boundaryLine.endsWith("↓ New content below · Ctrl+Down"));
+		assert.ok(visibleWidth(boundaryLine) <= terminal.columns);
+
+		tui.stop();
+	});
+
 	it("shows older and newer boundary hints only while scrolled away from the live bottom", async () => {
 		const terminal = new VirtualTerminal(50, 5);
 		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
@@ -494,7 +557,7 @@ describe("TUI Screen mode seam", () => {
 
 	it("lets visible Full-screen overlays handle wheel input without scrolling the Message viewport", async () => {
 		const terminal = new VirtualTerminal(30, 6);
-		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen", fullScreenMouseReporting: true });
 		const overlay = new FocusableInputRecorder("overlay");
 		const wheelOverOverlay = "\x1b[<64;5;6M";
 
@@ -519,9 +582,30 @@ describe("TUI Screen mode seam", () => {
 		tui.stop();
 	});
 
+	it("forwards Up and Down to the focused component without mouse reporting", async () => {
+		const terminal = new VirtualTerminal(40, 8);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+		const recorder = new InputRecorder();
+
+		tui.addChild(new Lines(["message 1", "message 2", "message 3", "message 4", "message 5", "message 6"]), {
+			region: "message-viewport",
+		});
+		tui.addChild(recorder, { region: "composer-region" });
+		tui.addChild(new Lines(["footer"]), { region: "composer-region" });
+		tui.setFocus(recorder);
+
+		tui.start();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[A");
+		terminal.sendInput("\x1b[B");
+		assert.deepStrictEqual(recorder.inputs, ["\x1b[A", "\x1b[B"]);
+
+		tui.stop();
+	});
+
 	it("routes non-consumed wheel input by pointer location in Full-screen mode", async () => {
 		const terminal = new VirtualTerminal(40, 12);
-		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen", fullScreenMouseReporting: true });
 		const editor = new Editor(tui, defaultEditorTheme);
 		const listenerInputs: string[] = [];
 		const wheelOverMessageViewport = "\x1b[<64;5;2M";
@@ -576,9 +660,74 @@ describe("TUI Screen mode seam", () => {
 		tui.stop();
 	});
 
+	it("supports pointer scrolling and app-owned text selection in the same Full-screen mode", async () => {
+		const terminal = new VirtualTerminal(40, 7);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen", fullScreenMouseReporting: true });
+		const selectedTexts: string[] = [];
+
+		tui.setFullScreenSelectionHandler((text) => {
+			selectedTexts.push(text);
+		});
+		tui.addChild(
+			new Lines(["message 1", "message 2", "message 3", "message 4", "message 5", "message 6", "message 7"]),
+			{ region: "message-viewport" },
+		);
+		tui.addChild(new Lines(["editor"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		assert.deepStrictEqual(terminal.getViewport().slice(0, 6), [
+			"message 2",
+			"message 3",
+			"message 4",
+			"message 5",
+			"message 6",
+			"message 7",
+		]);
+
+		terminal.sendInput("\x1b[<64;5;2M");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(terminal.getViewport().slice(0, 6), [
+			"message 1",
+			"message 2",
+			"message 3",
+			"message 4",
+			"message 5",
+			"message 6 · ↓ Newer below",
+		]);
+
+		terminal.sendInput("\x1b[<0;1;2M");
+		terminal.sendInput("\x1b[<32;9;2M");
+		terminal.sendInput("\x1b[<0;9;2m");
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(selectedTexts, ["message 2"]);
+
+		tui.stop();
+	});
+
+	it("keeps full-width lines within bounds while rendering a non-zero-column selection", async () => {
+		const terminal = new VirtualTerminal(130, 4);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen", fullScreenMouseReporting: true });
+
+		tui.addChild(new Lines(["a".repeat(130)]), { region: "message-viewport" });
+		tui.addChild(new Lines(["editor"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;9;3M");
+		terminal.sendInput("\x1b[<32;14;3M");
+		await terminal.waitForRender();
+
+		assert.strictEqual(terminal.getViewport()[2]?.length, 130);
+
+		tui.stop();
+	});
+
 	it("lets input listeners consume wheel input before built-in pointer routing", async () => {
 		const terminal = new VirtualTerminal(40, 12);
-		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen", fullScreenMouseReporting: true });
 		const editor = new Editor(tui, defaultEditorTheme);
 		const wheelEvent = "\x1b[<64;5;2M";
 
@@ -607,7 +756,7 @@ describe("TUI Screen mode seam", () => {
 
 	it("ignores non-wheel mouse input after listeners run in Full-screen mode", async () => {
 		const terminal = new VirtualTerminal(40, 8);
-		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen", fullScreenMouseReporting: true });
 		const recorder = new InputRecorder();
 		const listenerInputs: string[] = [];
 		const clickEvent = "\x1b[<0;5;2M";

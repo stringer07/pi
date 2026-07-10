@@ -1,7 +1,8 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { type Component, Container, type Focusable, TUI } from "../../tui/src/tui.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { ExtensionWidgetOptions } from "../src/core/extensions/types.ts";
+import { IdleStatus, type StatusIndicatorKind } from "../src/modes/interactive/components/status-indicator.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -112,6 +113,21 @@ type SetExtensionFooterFn = (
 	factory: ((tui: TUI, theme: object, footerData: object) => WidgetComponent) | undefined,
 ) => void;
 
+type StatusIndicatorComponent = Component & {
+	kind: StatusIndicatorKind;
+	dispose(): void;
+};
+
+type StatusIndicatorContext = {
+	ui: TUI;
+	activeStatusIndicator: StatusIndicatorComponent | undefined;
+	statusContainer: Container;
+	idleStatus: IdleStatus;
+	shouldRenderIdleStatus(): boolean;
+};
+
+type ClearStatusIndicatorFn = (this: StatusIndicatorContext, kind?: StatusIndicatorKind) => void;
+
 const showExtensionCustom = (
 	InteractiveMode.prototype as unknown as {
 		showExtensionCustom: ShowExtensionCustomFn;
@@ -141,6 +157,12 @@ const setExtensionFooter = (
 		setExtensionFooter: SetExtensionFooterFn;
 	}
 ).setExtensionFooter;
+
+const clearStatusIndicator = (
+	InteractiveMode.prototype as unknown as {
+		clearStatusIndicator: ClearStatusIndicatorFn;
+	}
+).clearStatusIndicator;
 
 function createFullScreenHarness(
 	messageLines: string[],
@@ -255,13 +277,121 @@ describe("Full-screen extension UI layout", () => {
 			expect(ui.getScreenRegion(widgetContainerBelow)).toBe("composer-region");
 			expect(ui.getScreenRegion(context.customFooter as Component)).toBe("composer-region");
 			expect(viewport[0]).toBe("message 1");
-			expect(viewport[1]).toBe("");
 			expect(viewport.slice(2, 12).map((line) => line.trim())).toEqual(aboveLines.slice(0, 10));
 			expect(viewport[12]).toContain("... (widget truncated)");
 			expect(viewport[13]).toBe("editor");
 			expect(viewport.slice(14, 24).map((line) => line.trim())).toEqual(belowLines.slice(0, 10));
 			expect(viewport[24]).toContain("... (widget truncated)");
 			expect(viewport[25]).toBe("custom footer");
+		} finally {
+			ui.stop();
+		}
+	});
+
+	it("does not reserve an empty above-editor widget spacer in the Composer region", async () => {
+		const { terminal, ui, widgetContainerAbove, widgetContainerBelow, footer } = createFullScreenHarness(
+			["message 1", "message 2", "message 3"],
+			5,
+		);
+		const context: WidgetFooterContext = {
+			ui,
+			extensionWidgetsAbove: new Map(),
+			extensionWidgetsBelow: new Map(),
+			widgetContainerAbove,
+			widgetContainerBelow,
+			renderWidgets() {
+				return renderWidgets.call(this);
+			},
+			renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {
+				return renderWidgetContainer.call(this, container, widgets, spacerWhenEmpty, leadingSpacer);
+			},
+			footer,
+			customFooter: undefined,
+			footerDataProvider: {},
+		};
+
+		renderWidgets.call(context);
+
+		ui.start();
+		try {
+			await flushTui(ui, terminal);
+			expect(terminal.getViewport()).toEqual(["message 1", "message 2", "message 3", "editor", "footer"]);
+		} finally {
+			ui.stop();
+		}
+	});
+
+	it("preserves the default empty above-editor spacer in Scrollback mode", () => {
+		const ui = new TUI(new VirtualTerminal(40, 5));
+		const widgetContainerAbove = new Container();
+		const widgetContainerBelow = new Container();
+		const context: WidgetFooterContext = {
+			ui,
+			extensionWidgetsAbove: new Map(),
+			extensionWidgetsBelow: new Map(),
+			widgetContainerAbove,
+			widgetContainerBelow,
+			renderWidgets() {
+				return renderWidgets.call(this);
+			},
+			renderWidgetContainer(container, widgets, spacerWhenEmpty, leadingSpacer) {
+				return renderWidgetContainer.call(this, container, widgets, spacerWhenEmpty, leadingSpacer);
+			},
+			footer: new StaticLines(["footer"]),
+			customFooter: undefined,
+			footerDataProvider: {},
+		};
+
+		renderWidgets.call(context);
+
+		expect(widgetContainerAbove.render(40)).toEqual([""]);
+	});
+
+	it("does not leave an idle status spacer above the editor in Full-screen mode", async () => {
+		const terminal = new VirtualTerminal(40, 7);
+		const ui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+		const statusContainer = new Container();
+		const activeStatus: StatusIndicatorComponent = {
+			kind: "working",
+			dispose: vi.fn(),
+			render: () => ["working"],
+			invalidate: vi.fn(),
+		};
+		const context: StatusIndicatorContext = {
+			ui,
+			activeStatusIndicator: activeStatus,
+			statusContainer,
+			idleStatus: new IdleStatus(),
+			shouldRenderIdleStatus() {
+				return ui.getScreenMode() !== "full-screen" && ui.getClearOnShrink();
+			},
+		};
+
+		ui.setClearOnShrink(true);
+		statusContainer.addChild(activeStatus);
+		ui.addChild(new StaticLines(["message 1", "message 2", "message 3", "message 4"]), {
+			region: "message-viewport",
+		});
+		ui.addChild(statusContainer, { region: "composer-region" });
+		ui.addChild(new StaticLines(["editor"]), { region: "composer-region" });
+		ui.addChild(new StaticLines(["footer"]), { region: "composer-region" });
+
+		clearStatusIndicator.call(context, "working");
+
+		ui.start();
+		try {
+			await flushTui(ui, terminal);
+			expect(activeStatus.dispose).toHaveBeenCalledOnce();
+			expect(statusContainer.children).toHaveLength(0);
+			expect(terminal.getViewport()).toEqual([
+				"",
+				"message 1",
+				"message 2",
+				"message 3",
+				"message 4",
+				"editor",
+				"footer",
+			]);
 		} finally {
 			ui.stop();
 		}

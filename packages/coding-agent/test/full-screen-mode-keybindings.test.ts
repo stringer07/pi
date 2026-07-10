@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { InteractiveMode, resolveFullScreenMouseReporting } from "../src/modes/interactive/interactive-mode.ts";
 
 type FakeInteractiveMode = {
 	defaultEditor: ReturnType<typeof createFakeEditor>;
@@ -59,6 +59,13 @@ type FakeViewportHintSyncContext = {
 };
 
 describe("Full-screen Message viewport keybindings", () => {
+	it("enables mouse reporting by default so pointer scrolling works", () => {
+		expect(resolveFullScreenMouseReporting("full-screen", undefined)).toBe(true);
+		expect(resolveFullScreenMouseReporting("full-screen", "1")).toBe(true);
+		expect(resolveFullScreenMouseReporting("full-screen", "0")).toBe(false);
+		expect(resolveFullScreenMouseReporting("scrollback", undefined)).toBe(false);
+	});
+
 	it("registers default and configurable viewport actions", () => {
 		const defaultBindings = new KeybindingsManager();
 
@@ -90,7 +97,6 @@ describe("Full-screen Message viewport keybindings", () => {
 		expect(fullScreenEditor.actionHandlers.has("app.messageViewport.jumpToBottom")).toBe(true);
 		expect(fullScreenEditor.actionHandlers.has("app.messageViewport.scrollUp")).toBe(true);
 		expect(fullScreenEditor.actionHandlers.has("app.messageViewport.scrollDown")).toBe(true);
-		expect(fullScreenEditor.onScrollHandoff).toBeTypeOf("function");
 		expect(fullScreenMode.ui.setFullScreenPointerScrollTarget).toHaveBeenCalledTimes(1);
 		expect(fullScreenMode.ui.setFullScreenPointerScrollTarget).toHaveBeenCalledWith(fullScreenEditor, {
 			scrollUp: expect.any(Function),
@@ -107,7 +113,6 @@ describe("Full-screen Message viewport keybindings", () => {
 		expect(scrollbackEditor.actionHandlers.has("app.messageViewport.jumpToBottom")).toBe(false);
 		expect(scrollbackEditor.actionHandlers.has("app.messageViewport.scrollUp")).toBe(false);
 		expect(scrollbackEditor.actionHandlers.has("app.messageViewport.scrollDown")).toBe(false);
-		expect(scrollbackEditor.onScrollHandoff).toBeUndefined();
 		expect(scrollbackMode.ui.setFullScreenPointerScrollTarget).not.toHaveBeenCalled();
 	});
 
@@ -139,7 +144,7 @@ describe("Full-screen Message viewport keybindings", () => {
 		expect(scrollbackMode.ui.setFullScreenMessageViewportJumpToBottomKeyDisplay).not.toHaveBeenCalled();
 	});
 
-	it("does not copy built-in Scroll handoff onto custom editors", () => {
+	it("does not copy built-in Message viewport actions onto custom editors", () => {
 		const setupKeyHandlers = (
 			InteractiveMode.prototype as unknown as { setupKeyHandlers(this: Record<string, unknown>): void }
 		).setupKeyHandlers;
@@ -160,7 +165,6 @@ describe("Full-screen Message viewport keybindings", () => {
 		extensionEditor.actionHandlers.set("app.messageViewport.pageUp", extensionPageUp);
 		setCustomEditorComponent.call(fullScreenMode, () => extensionEditor);
 
-		expect(fullScreenMode.defaultEditor.onScrollHandoff).toBeTypeOf("function");
 		expect(extensionEditor.setText).toHaveBeenCalledWith("draft");
 		expect(extensionEditor.actionHandlers.has("app.clear")).toBe(true);
 		expect(extensionEditor.actionHandlers.get("app.messageViewport.pageUp")).toBe(extensionPageUp);
@@ -169,7 +173,6 @@ describe("Full-screen Message viewport keybindings", () => {
 		expect(extensionEditor.actionHandlers.has("app.messageViewport.scrollUp")).toBe(false);
 		expect(extensionEditor.actionHandlers.has("app.messageViewport.scrollDown")).toBe(false);
 		expect(extensionEditor.onEscape).toBeTypeOf("function");
-		expect(extensionEditor.onScrollHandoff).toBeUndefined();
 	});
 });
 
@@ -184,7 +187,6 @@ function createFakeEditor(initialText = "") {
 		onExtensionShortcut: undefined as ((data: string) => boolean) | undefined,
 		onChange: undefined as ((text: string) => void) | undefined,
 		onSubmit: undefined as ((text: string) => void) | undefined,
-		onScrollHandoff: undefined as ((direction: "up" | "down") => void) | undefined,
 		borderColor: undefined as ((text: string) => string) | undefined,
 		scrollViewUp: vi.fn(() => true),
 		scrollViewDown: vi.fn(() => true),

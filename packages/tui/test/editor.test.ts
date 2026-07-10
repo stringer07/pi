@@ -39,6 +39,23 @@ async function flushAutocomplete(): Promise<void> {
 }
 
 describe("Editor component", () => {
+	describe("Manual viewport scrolling", () => {
+		it("returns to the cursor after vertical keyboard movement", () => {
+			const tui = createTestTUI(40, 10);
+			const editor = new Editor(tui, defaultEditorTheme);
+			editor.focused = true;
+			editor.setText(Array.from({ length: 10 }, (_, index) => `line ${index + 1}`).join("\n"));
+			editor.render(40);
+
+			assert.strictEqual(editor.scrollViewUp(5), true);
+			assert.ok(!editor.render(40).some((line) => stripVTControlCharacters(line).includes("line 9")));
+
+			editor.handleInput("\x1b[A");
+
+			assert.ok(editor.render(40).some((line) => stripVTControlCharacters(line).includes("line 9")));
+		});
+	});
+
 	describe("Prompt history navigation", () => {
 		it("does nothing on Up arrow when history is empty", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);

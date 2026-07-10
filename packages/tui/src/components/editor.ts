@@ -1006,10 +1006,6 @@ export class Editor implements Component, Focusable {
 		return this.scrollViewBy(Math.max(1, Math.floor(lines)));
 	}
 
-	protected isBrowsingHistory(): boolean {
-		return this.historyIndex > -1;
-	}
-
 	setText(text: string): void {
 		this.cancelAutocomplete();
 		this.lastAction = null;
@@ -1396,6 +1392,7 @@ export class Editor implements Component, Focusable {
 		currentVisualLine: number,
 		targetVisualLine: number,
 	): void {
+		this.manualScrollActive = false;
 		const currentVL = visualLines[currentVisualLine];
 		const targetVL = visualLines[targetVisualLine];
 		if (!(currentVL && targetVL)) return;

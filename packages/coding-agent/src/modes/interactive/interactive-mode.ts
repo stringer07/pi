@@ -211,6 +211,13 @@ const FULL_SCREEN_MESSAGE_VIEWPORT_ACTIONS = new Set<AppKeybinding>([
 	"app.messageViewport.scrollDown",
 ]);
 
+export function resolveFullScreenMouseReporting(
+	screenMode: ScreenMode | undefined,
+	envValue = process.env.PI_FULL_SCREEN_MOUSE_REPORTING,
+): boolean {
+	return screenMode === "full-screen" && envValue !== "0";
+}
+
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
 		return false;
@@ -488,6 +495,10 @@ export class InteractiveMode {
 		this.version = VERSION;
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor(), {
 			screenMode: options.screenMode,
+			fullScreenMouseReporting: resolveFullScreenMouseReporting(options.screenMode),
+		});
+		this.ui.setFullScreenSelectionHandler((text) => {
+			void this.copyFullScreenSelection(text);
 		});
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
@@ -745,7 +756,7 @@ export class InteractiveMode {
 		this.ui.addChild(this.chatContainer, { region: "message-viewport" });
 		this.ui.addChild(this.pendingMessagesContainer, { region: "composer-region" });
 		this.ui.addChild(this.statusContainer, { region: "composer-region" });
-		this.renderWidgets(); // Initialize with default spacer
+		this.renderWidgets();
 		this.ui.addChild(this.widgetContainerAbove, { region: "composer-region" });
 		this.ui.addChild(this.editorContainer, { region: "composer-region" });
 		this.ui.addChild(this.widgetContainerBelow, { region: "composer-region" });
@@ -1736,7 +1747,7 @@ export class InteractiveMode {
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 		const clearOnShrink = this.settingsManager.getClearOnShrink();
 		this.ui.setClearOnShrink(clearOnShrink);
-		if (!clearOnShrink && !this.activeStatusIndicator) {
+		if (!this.shouldRenderIdleStatus() && !this.activeStatusIndicator) {
 			this.statusContainer.clear();
 		}
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
@@ -1872,9 +1883,13 @@ export class InteractiveMode {
 		this.activeStatusIndicator?.dispose();
 		this.activeStatusIndicator = undefined;
 		this.statusContainer.clear();
-		if (hadActiveStatusIndicator && this.ui.getClearOnShrink()) {
+		if (hadActiveStatusIndicator && this.shouldRenderIdleStatus()) {
 			this.statusContainer.addChild(this.idleStatus);
 		}
+	}
+
+	private shouldRenderIdleStatus(): boolean {
+		return this.ui.getScreenMode() !== "full-screen" && this.ui.getClearOnShrink();
 	}
 
 	private setWorkingVisible(visible: boolean): void {
@@ -2015,7 +2030,12 @@ export class InteractiveMode {
 	 */
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
+		this.renderWidgetContainer(
+			this.widgetContainerAbove,
+			this.extensionWidgetsAbove,
+			this.ui.getScreenMode() === "scrollback",
+			true,
+		);
 		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
 		this.ui.requestRender();
 	}
@@ -2622,7 +2642,6 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
 		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
 		this.defaultEditor.onAction("app.session.resume", () => this.showSessionSelector());
-		this.defaultEditor.onScrollHandoff = undefined;
 		if (this.ui.getScreenMode() === "full-screen") {
 			this.ui.setFullScreenPointerScrollTarget(this.defaultEditor, {
 				scrollUp: () => this.defaultEditor.scrollViewUp(),
@@ -2633,13 +2652,6 @@ export class InteractiveMode {
 			this.defaultEditor.onAction("app.messageViewport.jumpToBottom", () => this.ui.jumpMessageViewportToBottom());
 			this.defaultEditor.onAction("app.messageViewport.scrollUp", () => this.ui.scrollMessageViewportUp());
 			this.defaultEditor.onAction("app.messageViewport.scrollDown", () => this.ui.scrollMessageViewportDown());
-			this.defaultEditor.onScrollHandoff = (direction: "up" | "down") => {
-				if (direction === "up") {
-					this.ui.scrollMessageViewportUp();
-					return;
-				}
-				this.ui.scrollMessageViewportDown();
-			};
 		}
 
 		this.defaultEditor.onChange = (text: string) => {
@@ -3644,7 +3656,8 @@ export class InteractiveMode {
 	private registerSignalHandlers(): void {
 		this.unregisterSignalHandlers();
 
-		const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
+		const fullScreenMode = this.isFullScreenMode();
+		const signals: NodeJS.Signals[] = fullScreenMode ? ["SIGINT", "SIGTERM"] : ["SIGTERM"];
 		if (process.platform !== "win32") {
 			signals.push("SIGHUP");
 		}
@@ -3683,12 +3696,14 @@ export class InteractiveMode {
 		process.prependListener("uncaughtException", uncaughtExceptionHandler);
 		this.signalCleanupHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
 
-		const unhandledRejectionHandler = (reason: unknown) => {
-			const error = reason instanceof Error ? reason : new Error(`Unhandled rejection: ${String(reason)}`);
-			this.uncaughtCrash(error, "unhandledRejection");
-		};
-		process.prependListener("unhandledRejection", unhandledRejectionHandler);
-		this.signalCleanupHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
+		if (fullScreenMode) {
+			const unhandledRejectionHandler = (reason: unknown) => {
+				const error = reason instanceof Error ? reason : new Error(`Unhandled rejection: ${String(reason)}`);
+				this.uncaughtCrash(error, "unhandledRejection");
+			};
+			process.prependListener("unhandledRejection", unhandledRejectionHandler);
+			this.signalCleanupHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
+		}
 	}
 
 	private unregisterSignalHandlers(): void {
@@ -4343,7 +4358,7 @@ export class InteractiveMode {
 					onClearOnShrinkChange: (enabled) => {
 						this.settingsManager.setClearOnShrink(enabled);
 						this.ui.setClearOnShrink(enabled);
-						if (!enabled && !this.activeStatusIndicator) {
+						if (!this.shouldRenderIdleStatus() && !this.activeStatusIndicator) {
 							this.statusContainer.clear();
 						}
 					},
@@ -5430,7 +5445,7 @@ export class InteractiveMode {
 			this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 			const clearOnShrink = this.settingsManager.getClearOnShrink();
 			this.ui.setClearOnShrink(clearOnShrink);
-			if (!clearOnShrink && !this.activeStatusIndicator) {
+			if (!this.shouldRenderIdleStatus() && !this.activeStatusIndicator) {
 				this.statusContainer.clear();
 			}
 			this.setupAutocompleteProvider();
@@ -5653,6 +5668,15 @@ export class InteractiveMode {
 		try {
 			await copyToClipboard(text);
 			this.showStatus("Copied last agent message to clipboard");
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private async copyFullScreenSelection(text: string): Promise<void> {
+		try {
+			await copyToClipboard(text);
+			this.showStatus("Copied selection to clipboard");
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}

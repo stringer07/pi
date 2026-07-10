@@ -17,6 +17,7 @@ import {
 } from "./terminal-colors.ts";
 import { deleteKittyImage, getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
 import {
+	extractAnsiCode,
 	extractSegments,
 	normalizeTerminalOutput,
 	sliceByColumn,
@@ -28,8 +29,10 @@ import {
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 const ALTERNATE_SCREEN_ENABLE_SEQUENCE = "\x1b[?1049h";
 const ALTERNATE_SCREEN_DISABLE_SEQUENCE = "\x1b[?1049l";
-const MOUSE_REPORTING_ENABLE_SEQUENCE = "\x1b[?1000h\x1b[?1006h";
-const MOUSE_REPORTING_DISABLE_SEQUENCE = "\x1b[?1000l\x1b[?1006l";
+const MOUSE_REPORTING_ENABLE_SEQUENCE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_REPORTING_DISABLE_SEQUENCE = "\x1b[?1002l\x1b[?1000l\x1b[?1006l";
+const SELECTION_ENABLE_SEQUENCE = "\x1b[7m";
+const SELECTION_DISABLE_SEQUENCE = "\x1b[27m";
 
 interface KittyImageHeader {
 	ids: number[];
@@ -112,8 +115,16 @@ type PointerScrollTarget = {
 	scrollDown: () => boolean;
 };
 
+type FullScreenSelectionPoint = {
+	row: number;
+	col: number;
+};
+
 type FullScreenPointerEvent =
 	| { kind: "wheel"; direction: "up" | "down"; row: number; col: number }
+	| { kind: "left-down"; row: number; col: number }
+	| { kind: "left-drag"; row: number; col: number }
+	| { kind: "left-up"; row: number; col: number }
 	| { kind: "other"; row: number; col: number };
 
 function parseFullScreenPointerEvent(data: string): FullScreenPointerEvent | undefined {
@@ -137,6 +148,19 @@ function parseFullScreenPointerEvent(data: string): FullScreenPointerEvent | und
 		if (wheelDirection === 1) {
 			return { kind: "wheel", direction: "down", row, col };
 		}
+	}
+
+	const button = code & 0b11;
+	const isRelease = match[4] === "m";
+	const isMotion = (code & 32) !== 0;
+	if (button === 0) {
+		if (isRelease) {
+			return { kind: "left-up", row, col };
+		}
+		if (isMotion) {
+			return { kind: "left-drag", row, col };
+		}
+		return { kind: "left-down", row, col };
 	}
 
 	return { kind: "other", row, col };
@@ -286,6 +310,7 @@ export interface TUIChildOptions {
 
 export interface TUIOptions {
 	screenMode?: ScreenMode;
+	fullScreenMouseReporting?: boolean;
 }
 
 type FullScreenLayout = {
@@ -393,6 +418,7 @@ export class TUI extends Container {
 	private terminalColorSchemeListeners = new Set<(scheme: TerminalColorScheme) => void>();
 	private terminalColorSchemeNotificationsEnabled = false;
 	private readonly screenMode: ScreenMode;
+	private readonly fullScreenMouseReporting: boolean;
 	private readonly childRegions = new Map<Component, ScreenRegion>();
 	private fullScreenMessageViewportDistanceFromBottom = 0;
 	private fullScreenMessageViewportLastMessageLineCount = 0;
@@ -400,6 +426,11 @@ export class TUI extends Container {
 	private fullScreenMessageViewportHasNewContentBelow = false;
 	private fullScreenMessageViewportJumpToBottomKeyDisplay = "";
 	private fullScreenPointerScrollTarget?: PointerScrollTarget;
+	private fullScreenSelectionAnchor?: FullScreenSelectionPoint;
+	private fullScreenSelectionFocus?: FullScreenSelectionPoint;
+	private fullScreenSelectionActive = false;
+	private fullScreenSelectionSourceLines: string[] = [];
+	private fullScreenSelectionHandler?: (text: string) => void;
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
@@ -410,6 +441,7 @@ export class TUI extends Container {
 		super();
 		this.terminal = terminal;
 		this.screenMode = options.screenMode ?? "scrollback";
+		this.fullScreenMouseReporting = options.fullScreenMouseReporting ?? false;
 		if (showHardwareCursor !== undefined) {
 			this.showHardwareCursor = showHardwareCursor;
 		}
@@ -585,8 +617,27 @@ export class TUI extends Container {
 			messageLines.length,
 			width,
 		);
-		const topPadding = Math.max(0, messageViewportHeight - visibleMessageLines.length);
-		return [...Array<string>(topPadding).fill(""), ...visibleMessageLines, ...composerLines];
+		const boundaryMessageLines = this.trimTrailingMessageViewportBoundaryBlankLines(
+			visibleMessageLines,
+			messageViewportDistanceFromBottom,
+		);
+		const topPadding = Math.max(0, messageViewportHeight - boundaryMessageLines.length);
+		return [...Array<string>(topPadding).fill(""), ...boundaryMessageLines, ...composerLines];
+	}
+
+	private trimTrailingMessageViewportBoundaryBlankLines(
+		lines: string[],
+		messageViewportDistanceFromBottom: number,
+	): string[] {
+		if (messageViewportDistanceFromBottom !== 0) {
+			return lines;
+		}
+
+		let end = lines.length;
+		while (end > 0 && visibleWidth(lines[end - 1] ?? "") === 0) {
+			end--;
+		}
+		return end === lines.length ? lines : lines.slice(0, end);
 	}
 
 	private getVisibleMessageViewportWindow(
@@ -668,9 +719,13 @@ export class TUI extends Container {
 		options: { position?: "prefix" | "suffix" } = {},
 	): string {
 		const separator = " · ";
-		const text =
-			options.position === "prefix" ? `${hintText}${separator}${baseLine}` : `${baseLine}${separator}${hintText}`;
-		return truncateToWidth(text, width);
+		const hint = options.position === "prefix" ? `${hintText}${separator}` : `${separator}${hintText}`;
+		const hintWidth = visibleWidth(hint);
+		if (hintWidth >= width) {
+			return truncateToWidth(hintText, width);
+		}
+		const base = truncateToWidth(baseLine, width - hintWidth, "");
+		return options.position === "prefix" ? `${hint}${base}` : `${base}${hint}`;
 	}
 
 	private getMaxMessageViewportDistanceFromBottom(totalMessageLines: number, messageViewportHeight: number): number {
@@ -785,6 +840,10 @@ export class TUI extends Container {
 			scrollUp: handlers.scrollUp,
 			scrollDown: handlers.scrollDown,
 		};
+	}
+
+	setFullScreenSelectionHandler(handler: ((text: string) => void) | undefined): void {
+		this.fullScreenSelectionHandler = handler;
 	}
 
 	setShowHardwareCursor(enabled: boolean): void {
@@ -1086,7 +1145,9 @@ export class TUI extends Container {
 		);
 		if (this.screenMode === "full-screen") {
 			this.terminal.write(ALTERNATE_SCREEN_ENABLE_SEQUENCE);
-			this.terminal.write(MOUSE_REPORTING_ENABLE_SEQUENCE);
+			if (this.fullScreenMouseReporting) {
+				this.terminal.write(MOUSE_REPORTING_ENABLE_SEQUENCE);
+			}
 		}
 		this.terminal.hideCursor();
 		if (this.terminalColorSchemeNotificationsEnabled) {
@@ -1156,7 +1217,9 @@ export class TUI extends Container {
 		}
 
 		if (this.screenMode === "full-screen") {
-			this.terminal.write(MOUSE_REPORTING_DISABLE_SEQUENCE);
+			if (this.fullScreenMouseReporting) {
+				this.terminal.write(MOUSE_REPORTING_DISABLE_SEQUENCE);
+			}
 			this.terminal.write(ALTERNATE_SCREEN_DISABLE_SEQUENCE);
 		}
 		this.terminal.showCursor();
@@ -1348,8 +1411,132 @@ export class TUI extends Container {
 		return true;
 	}
 
-	private handleFullScreenPointerInput(data: string): boolean {
+	private getFullScreenSelectionRange():
+		| {
+				start: FullScreenSelectionPoint;
+				end: FullScreenSelectionPoint;
+		  }
+		| undefined {
+		if (!this.fullScreenSelectionAnchor || !this.fullScreenSelectionFocus) {
+			return undefined;
+		}
+
+		const anchor = this.fullScreenSelectionAnchor;
+		const focus = this.fullScreenSelectionFocus;
+		if (anchor.row === focus.row && anchor.col === focus.col) {
+			return undefined;
+		}
+
+		if (anchor.row < focus.row || (anchor.row === focus.row && anchor.col <= focus.col)) {
+			return { start: anchor, end: focus };
+		}
+		return { start: focus, end: anchor };
+	}
+
+	private updateFullScreenSelection(point: FullScreenSelectionPoint): void {
+		this.fullScreenSelectionFocus = this.clampFullScreenSelectionPoint(point);
+		this.requestRender();
+	}
+
+	private clampFullScreenSelectionPoint(point: FullScreenSelectionPoint): FullScreenSelectionPoint {
+		return {
+			row: Math.max(0, Math.min(this.terminal.rows - 1, point.row)),
+			col: Math.max(0, Math.min(this.terminal.columns - 1, point.col)),
+		};
+	}
+
+	private clearFullScreenSelection(options: { render?: boolean } = {}): void {
+		if (!this.fullScreenSelectionAnchor && !this.fullScreenSelectionFocus && !this.fullScreenSelectionActive) {
+			return;
+		}
+		this.fullScreenSelectionAnchor = undefined;
+		this.fullScreenSelectionFocus = undefined;
+		this.fullScreenSelectionActive = false;
+		if (options.render) {
+			this.requestRender();
+		}
+	}
+
+	private applyFullScreenSelection(lines: string[], width: number): string[] {
 		if (this.screenMode !== "full-screen") {
+			return lines;
+		}
+
+		const range = this.getFullScreenSelectionRange();
+		if (!range) {
+			return lines;
+		}
+
+		return lines.map((line, row) => {
+			const span = this.getSelectionSpanForRow(row, range, width);
+			if (!span) {
+				return line;
+			}
+			const selectedLength = span.end - span.start;
+			const before = sliceByColumn(line, 0, span.start, true);
+			const selected = sliceByColumn(line, span.start, selectedLength, true);
+			const after = sliceByColumn(line, span.end, width - span.end, true);
+			if (visibleWidth(selected) === 0) {
+				return line;
+			}
+			return `${before}${SELECTION_ENABLE_SEQUENCE}${selected}${SELECTION_DISABLE_SEQUENCE}${after}`;
+		});
+	}
+
+	private getSelectionSpanForRow(
+		row: number,
+		range: { start: FullScreenSelectionPoint; end: FullScreenSelectionPoint },
+		width: number,
+	): { start: number; end: number } | undefined {
+		if (row < range.start.row || row > range.end.row) {
+			return undefined;
+		}
+
+		const start = row === range.start.row ? range.start.col : 0;
+		const end = row === range.end.row ? range.end.col + 1 : width;
+		if (start >= end) {
+			return undefined;
+		}
+		return { start, end };
+	}
+
+	private getFullScreenSelectedText(): string {
+		const range = this.getFullScreenSelectionRange();
+		if (!range) {
+			return "";
+		}
+
+		const lines: string[] = [];
+		for (let row = range.start.row; row <= range.end.row; row++) {
+			const line = this.fullScreenSelectionSourceLines[row] ?? "";
+			const span = this.getSelectionSpanForRow(row, range, this.terminal.columns);
+			if (!span) {
+				continue;
+			}
+			lines.push(
+				this.stripTerminalControlCodes(sliceByColumn(line, span.start, span.end - span.start, true)).trimEnd(),
+			);
+		}
+		return lines.join("\n");
+	}
+
+	private stripTerminalControlCodes(text: string): string {
+		let result = "";
+		let index = 0;
+		while (index < text.length) {
+			const ansi = extractAnsiCode(text, index);
+			if (ansi) {
+				index += ansi.length;
+				continue;
+			}
+			result += text[index];
+			index++;
+		}
+		return result;
+	}
+
+	private handleFullScreenPointerInput(data: string): boolean {
+		if (this.screenMode !== "full-screen" || !this.fullScreenMouseReporting) {
 			return false;
 		}
 
@@ -1374,9 +1561,40 @@ export class TUI extends Container {
 			return true;
 		}
 
-		if (pointerEvent.kind !== "wheel") {
+		if (pointerEvent.kind === "left-down") {
+			const point = this.clampFullScreenSelectionPoint(pointerEvent);
+			this.fullScreenSelectionAnchor = point;
+			this.fullScreenSelectionFocus = point;
+			this.fullScreenSelectionActive = true;
+			this.requestRender();
 			return true;
 		}
+
+		if (pointerEvent.kind === "left-drag") {
+			if (this.fullScreenSelectionActive) {
+				this.updateFullScreenSelection(pointerEvent);
+			}
+			return true;
+		}
+
+		if (pointerEvent.kind === "left-up") {
+			if (this.fullScreenSelectionActive) {
+				this.updateFullScreenSelection(pointerEvent);
+				this.fullScreenSelectionActive = false;
+				const selectedText = this.getFullScreenSelectedText();
+				if (selectedText.trim().length > 0) {
+					this.fullScreenSelectionHandler?.(selectedText);
+				}
+			}
+			return true;
+		}
+
+		if (pointerEvent.kind !== "wheel") {
+			this.clearFullScreenSelection({ render: true });
+			return true;
+		}
+
+		this.clearFullScreenSelection();
 
 		const layout = this.getFullScreenPointerLayout();
 		if (!layout) {
@@ -1910,6 +2128,9 @@ export class TUI extends Container {
 
 		// Extract cursor position before applying line resets (marker must be found first)
 		const cursorPos = this.extractCursorPosition(newLines, height);
+
+		this.fullScreenSelectionSourceLines = newLines;
+		newLines = this.applyFullScreenSelection(newLines, width);
 
 		newLines = this.applyLineResets(newLines);
 

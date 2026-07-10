@@ -16,6 +16,7 @@ type SignalCleanup = () => void;
 type RegisterSignalHandlersThis = {
 	signalCleanupHandlers: SignalCleanup[];
 	ignoreProcessSigint?: boolean;
+	isFullScreenMode(): boolean;
 	unregisterSignalHandlers(): void;
 	shutdown(options?: { fromSignal?: boolean }): Promise<void>;
 	emergencyTerminalExit(): never;
@@ -61,6 +62,7 @@ describe("Full-screen terminal restoration seams", () => {
 		const crashSentinel = new CrashSentinel("crash sentinel");
 		const context: RegisterSignalHandlersThis = {
 			signalCleanupHandlers: [],
+			isFullScreenMode: () => true,
 			unregisterSignalHandlers: vi.fn(),
 			shutdown: vi.fn(async () => {}),
 			emergencyTerminalExit: vi.fn(() => {
@@ -102,6 +104,7 @@ describe("Full-screen terminal restoration seams", () => {
 		const context: RegisterSignalHandlersThis = {
 			signalCleanupHandlers: [],
 			ignoreProcessSigint: false,
+			isFullScreenMode: () => true,
 			unregisterSignalHandlers: vi.fn(),
 			shutdown: vi.fn(async () => {}),
 			emergencyTerminalExit: vi.fn(() => {
@@ -135,6 +138,45 @@ describe("Full-screen terminal restoration seams", () => {
 
 		sigintHandler?.();
 		expect(context.shutdown).toHaveBeenCalledWith({ fromSignal: true });
+	});
+
+	test("does not add Full-screen-only process handlers in Scrollback mode", () => {
+		const registeredHandlers = new Map<string, (...args: unknown[]) => void>();
+		const context: RegisterSignalHandlersThis = {
+			signalCleanupHandlers: [],
+			isFullScreenMode: () => false,
+			unregisterSignalHandlers: vi.fn(),
+			shutdown: vi.fn(async () => {}),
+			emergencyTerminalExit: vi.fn(() => {
+				throw new Error("unexpected emergency exit");
+			}),
+			uncaughtCrash: vi.fn((() => {
+				throw new Error("unexpected crash");
+			}) as RegisterSignalHandlersThis["uncaughtCrash"]),
+		};
+
+		vi.spyOn(process, "prependListener").mockImplementation(((
+			event: string,
+			listener: (...args: unknown[]) => void,
+		) => {
+			registeredHandlers.set(event, listener);
+			return process;
+		}) as typeof process.prependListener);
+		vi.spyOn(process.stdout, "on").mockImplementation(
+			((_event: string, _listener: (...args: unknown[]) => void) => process.stdout) as typeof process.stdout.on,
+		);
+		vi.spyOn(process.stderr, "on").mockImplementation(
+			((_event: string, _listener: (...args: unknown[]) => void) => process.stderr) as typeof process.stderr.on,
+		);
+
+		(interactiveModePrototype as InteractiveModePrototypeWithRegisterSignalHandlers).registerSignalHandlers.call(
+			context,
+		);
+
+		expect(registeredHandlers.has("SIGINT")).toBe(false);
+		expect(registeredHandlers.has("unhandledRejection")).toBe(false);
+		expect(registeredHandlers.has("SIGTERM")).toBe(true);
+		expect(registeredHandlers.has("uncaughtException")).toBe(true);
 	});
 
 	test("releases and restores the terminal around the external editor with a full redraw", async () => {
