@@ -23,10 +23,9 @@ The Composer region stays fixed at the bottom. The Message viewport fills the re
 
 - `PageUp` scrolls the Message viewport upward by one page.
 - `PageDown` scrolls the Message viewport downward by one page.
-- `Ctrl+Down` jumps back to the live bottom.
 - Up and Down stay editor-local for cursor movement, autocomplete, and prompt history.
 
-When you scroll up and new content arrives, Pi preserves your historical view and shows a **New content indicator** instead of snapping back to the bottom. Sending a new message returns the Message viewport to the live bottom.
+When you scroll up and new content arrives, Pi preserves your historical view instead of snapping back to the bottom. Sending a new message returns the Message viewport to the live bottom.
 
 ## Configurable actions
 
@@ -36,7 +35,6 @@ Full-screen Message viewport shortcuts use these keybinding action ids:
 | --- | --- |
 | `app.messageViewport.pageUp` | `PageUp` |
 | `app.messageViewport.pageDown` | `PageDown` |
-| `app.messageViewport.jumpToBottom` | `Ctrl+Down` |
 | `app.messageViewport.scrollUp` | unbound |
 | `app.messageViewport.scrollDown` | unbound |
 
@@ -44,7 +42,7 @@ Full-screen Message viewport shortcuts use these keybinding action ids:
 
 Full-screen mode enables terminal mouse reporting by default so wheel and trackpad input can scroll the Message viewport or focused Composer region.
 
-Because terminal mouse reporting prevents ordinary terminal-native drag selection in many terminals, Pi implements its own visible-text selection in Full-screen mode. Drag over visible text to select it; when you release the mouse button, Pi copies the selected text to the system clipboard.
+Because terminal mouse reporting prevents ordinary terminal-native drag selection in many terminals, Pi implements its own visible-text selection in Full-screen mode. Drag over visible text to select it; when you release the mouse button, Pi copies the selected text to the system clipboard. Copy confirmation appears directly above the editor and disappears after three seconds.
 
 If you need terminal-native selection instead of Pi-owned selection, start Pi with mouse reporting disabled:
 
@@ -78,10 +76,10 @@ When Pi resumes, it redraws the current session in Full-screen mode. Returning f
 
 - Start `pi --full-screen-mode`.
 - Verify the Message viewport is above the fixed Composer region.
-- Use `PageUp`, `PageDown`, and `Ctrl+Down`.
+- Use `PageUp` and `PageDown`.
 - Verify wheel or trackpad input scrolls the Message viewport.
 - Drag over visible text, release, and verify the selected text is copied to the clipboard.
-- Scroll up, trigger new output, and verify the New content indicator appears without losing your position.
+- Scroll up, trigger new output, and verify the Message viewport preserves its position.
 - Optionally rerun with `PI_FULL_SCREEN_MOUSE_REPORTING=0` and verify terminal-native selection plus keyboard Message viewport navigation.
 - Exercise representative extension UI: an overlay and a replacement UI if your setup provides them.
 - Suspend with `Ctrl+Z`, then resume with `fg`.

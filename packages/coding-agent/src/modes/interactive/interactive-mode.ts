@@ -206,7 +206,6 @@ const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 const FULL_SCREEN_MESSAGE_VIEWPORT_ACTIONS = new Set<AppKeybinding>([
 	"app.messageViewport.pageUp",
 	"app.messageViewport.pageDown",
-	"app.messageViewport.jumpToBottom",
 	"app.messageViewport.scrollUp",
 	"app.messageViewport.scrollDown",
 ]);
@@ -363,6 +362,8 @@ export class InteractiveMode {
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
+	private clipboardStatusContainer: Container;
+	private clipboardStatusTimeout: ReturnType<typeof setTimeout> | undefined;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private editorComponentFactory: EditorFactory | undefined;
@@ -507,11 +508,14 @@ export class InteractiveMode {
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
+		this.clipboardStatusContainer = new Container();
+		if (this.isFullScreenMode()) {
+			this.clipboardStatusContainer.addChild(new TruncatedText("", 1, 0));
+		}
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
-		this.updateFullScreenMessageViewportHintState();
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
 		const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
@@ -759,6 +763,7 @@ export class InteractiveMode {
 		this.ui.addChild(this.statusContainer, { region: "composer-region" });
 		this.renderWidgets();
 		this.ui.addChild(this.widgetContainerAbove, { region: "composer-region" });
+		this.ui.addChild(this.clipboardStatusContainer, { region: "composer-region" });
 		this.ui.addChild(this.editorContainer, { region: "composer-region" });
 		this.ui.addChild(this.widgetContainerBelow, { region: "composer-region" });
 		this.ui.addChild(this.footer, { region: "composer-region" });
@@ -872,15 +877,6 @@ export class InteractiveMode {
 
 	private isFullScreenMode(): boolean {
 		return this.ui.getScreenMode() === "full-screen";
-	}
-
-	private updateFullScreenMessageViewportHintState(): void {
-		if (this.ui.getScreenMode() !== "full-screen") {
-			return;
-		}
-		this.ui.setFullScreenMessageViewportJumpToBottomKeyDisplay(
-			this.getAppKeyDisplay("app.messageViewport.jumpToBottom"),
-		);
 	}
 
 	/**
@@ -2650,7 +2646,6 @@ export class InteractiveMode {
 			});
 			this.defaultEditor.onAction("app.messageViewport.pageUp", () => this.ui.pageMessageViewportUp());
 			this.defaultEditor.onAction("app.messageViewport.pageDown", () => this.ui.pageMessageViewportDown());
-			this.defaultEditor.onAction("app.messageViewport.jumpToBottom", () => this.ui.jumpMessageViewportToBottom());
 			this.defaultEditor.onAction("app.messageViewport.scrollUp", () => this.ui.scrollMessageViewportUp());
 			this.defaultEditor.onAction("app.messageViewport.scrollDown", () => this.ui.scrollMessageViewportDown());
 		}
@@ -3196,6 +3191,26 @@ export class InteractiveMode {
 				? [{ type: "text", text: message.content }]
 				: message.content.filter((c: { type: string }) => c.type === "text");
 		return textBlocks.map((c) => (c as { text: string }).text).join("");
+	}
+
+	private showClipboardStatus(message: string): void {
+		if (!this.isFullScreenMode()) {
+			this.showStatus(message);
+			return;
+		}
+
+		if (this.clipboardStatusTimeout) {
+			clearTimeout(this.clipboardStatusTimeout);
+		}
+		this.clipboardStatusContainer.clear();
+		this.clipboardStatusContainer.addChild(new TruncatedText(theme.fg("dim", message), 1, 0));
+		this.ui.requestRender();
+		this.clipboardStatusTimeout = setTimeout(() => {
+			this.clipboardStatusTimeout = undefined;
+			this.clipboardStatusContainer.clear();
+			this.clipboardStatusContainer.addChild(new TruncatedText("", 1, 0));
+			this.ui.requestRender();
+		}, 3000);
 	}
 
 	/**
@@ -5428,7 +5443,6 @@ export class InteractiveMode {
 			restoreChatBeforeSessionStart();
 			configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
 			this.keybindings.reload();
-			this.updateFullScreenMessageViewportHintState();
 			const activeHeader = this.customHeader ?? this.builtInHeader;
 			if (isExpandable(activeHeader)) {
 				activeHeader.setExpanded(this.toolOutputExpanded);
@@ -5668,7 +5682,7 @@ export class InteractiveMode {
 
 		try {
 			await copyToClipboard(text);
-			this.showStatus("Copied last agent message to clipboard");
+			this.showClipboardStatus("Copied last agent message to clipboard");
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -5677,7 +5691,7 @@ export class InteractiveMode {
 	private async copyFullScreenSelection(text: string): Promise<void> {
 		try {
 			await copyToClipboard(text);
-			this.showStatus("Copied selection to clipboard");
+			this.showClipboardStatus("Copied selection to clipboard");
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -6107,6 +6121,11 @@ export class InteractiveMode {
 			this.ui.terminal.setProgress(false);
 		}
 		this.clearStatusIndicator();
+		if (this.clipboardStatusTimeout) {
+			clearTimeout(this.clipboardStatusTimeout);
+			this.clipboardStatusTimeout = undefined;
+		}
+		this.clipboardStatusContainer.clear();
 		this.themeController.disableAutoSync();
 		this.clearExtensionTerminalInputListeners();
 		this.footer.dispose();

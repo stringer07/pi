@@ -21,7 +21,6 @@ type FakeInteractiveMode = {
 		scrollMessageViewportUp: ReturnType<typeof vi.fn>;
 		scrollMessageViewportDown: ReturnType<typeof vi.fn>;
 		setFullScreenPointerScrollTarget: ReturnType<typeof vi.fn>;
-		setFullScreenMessageViewportJumpToBottomKeyDisplay?: ReturnType<typeof vi.fn>;
 		setFocus: ReturnType<typeof vi.fn>;
 		requestRender: ReturnType<typeof vi.fn>;
 	};
@@ -47,15 +46,6 @@ type FakeInteractiveMode = {
 	handleClipboardImagePaste: ReturnType<typeof vi.fn>;
 	isBashMode: boolean;
 	updateEditorBorderColor: ReturnType<typeof vi.fn>;
-	getAppKeyDisplay?: ReturnType<typeof vi.fn>;
-};
-
-type FakeViewportHintSyncContext = {
-	ui: {
-		getScreenMode: () => "scrollback" | "full-screen";
-		setFullScreenMessageViewportJumpToBottomKeyDisplay: ReturnType<typeof vi.fn>;
-	};
-	getAppKeyDisplay: ReturnType<typeof vi.fn>;
 };
 
 describe("Full-screen Message viewport keybindings", () => {
@@ -71,7 +61,6 @@ describe("Full-screen Message viewport keybindings", () => {
 
 		expect(defaultBindings.getKeys("app.messageViewport.pageUp")).toEqual(["pageUp"]);
 		expect(defaultBindings.getKeys("app.messageViewport.pageDown")).toEqual(["pageDown"]);
-		expect(defaultBindings.getKeys("app.messageViewport.jumpToBottom")).toEqual(["ctrl+down"]);
 		expect(defaultBindings.getKeys("app.messageViewport.scrollUp")).toEqual([]);
 		expect(defaultBindings.getKeys("app.messageViewport.scrollDown")).toEqual([]);
 
@@ -94,7 +83,6 @@ describe("Full-screen Message viewport keybindings", () => {
 		setupKeyHandlers.call(fullScreenMode);
 		expect(fullScreenEditor.actionHandlers.has("app.messageViewport.pageUp")).toBe(true);
 		expect(fullScreenEditor.actionHandlers.has("app.messageViewport.pageDown")).toBe(true);
-		expect(fullScreenEditor.actionHandlers.has("app.messageViewport.jumpToBottom")).toBe(true);
 		expect(fullScreenEditor.actionHandlers.has("app.messageViewport.scrollUp")).toBe(true);
 		expect(fullScreenEditor.actionHandlers.has("app.messageViewport.scrollDown")).toBe(true);
 		expect(fullScreenMode.ui.setFullScreenPointerScrollTarget).toHaveBeenCalledTimes(1);
@@ -110,38 +98,9 @@ describe("Full-screen Message viewport keybindings", () => {
 		setupKeyHandlers.call(scrollbackMode);
 		expect(scrollbackEditor.actionHandlers.has("app.messageViewport.pageUp")).toBe(false);
 		expect(scrollbackEditor.actionHandlers.has("app.messageViewport.pageDown")).toBe(false);
-		expect(scrollbackEditor.actionHandlers.has("app.messageViewport.jumpToBottom")).toBe(false);
 		expect(scrollbackEditor.actionHandlers.has("app.messageViewport.scrollUp")).toBe(false);
 		expect(scrollbackEditor.actionHandlers.has("app.messageViewport.scrollDown")).toBe(false);
 		expect(scrollbackMode.ui.setFullScreenPointerScrollTarget).not.toHaveBeenCalled();
-	});
-
-	it("syncs the jump-to-bottom key display into the Full-screen Message viewport hint state", () => {
-		const syncViewportHint = (
-			InteractiveMode.prototype as unknown as {
-				updateFullScreenMessageViewportHintState(this: Record<string, unknown>): void;
-			}
-		).updateFullScreenMessageViewportHintState;
-
-		const fullScreenMode: FakeViewportHintSyncContext = {
-			ui: {
-				getScreenMode: () => "full-screen" as const,
-				setFullScreenMessageViewportJumpToBottomKeyDisplay: vi.fn(),
-			},
-			getAppKeyDisplay: vi.fn(() => "Ctrl+Down"),
-		};
-		syncViewportHint.call(fullScreenMode);
-		expect(fullScreenMode.ui.setFullScreenMessageViewportJumpToBottomKeyDisplay).toHaveBeenCalledWith("Ctrl+Down");
-
-		const scrollbackMode: FakeViewportHintSyncContext = {
-			ui: {
-				getScreenMode: () => "scrollback" as const,
-				setFullScreenMessageViewportJumpToBottomKeyDisplay: vi.fn(),
-			},
-			getAppKeyDisplay: vi.fn(() => "Ctrl+Down"),
-		};
-		syncViewportHint.call(scrollbackMode);
-		expect(scrollbackMode.ui.setFullScreenMessageViewportJumpToBottomKeyDisplay).not.toHaveBeenCalled();
 	});
 
 	it("does not copy built-in Message viewport actions onto custom editors", () => {
@@ -169,7 +128,6 @@ describe("Full-screen Message viewport keybindings", () => {
 		expect(extensionEditor.actionHandlers.has("app.clear")).toBe(true);
 		expect(extensionEditor.actionHandlers.get("app.messageViewport.pageUp")).toBe(extensionPageUp);
 		expect(extensionEditor.actionHandlers.has("app.messageViewport.pageDown")).toBe(false);
-		expect(extensionEditor.actionHandlers.has("app.messageViewport.jumpToBottom")).toBe(false);
 		expect(extensionEditor.actionHandlers.has("app.messageViewport.scrollUp")).toBe(false);
 		expect(extensionEditor.actionHandlers.has("app.messageViewport.scrollDown")).toBe(false);
 		expect(extensionEditor.onEscape).toBeTypeOf("function");

@@ -429,9 +429,6 @@ export class TUI extends Container {
 	private fullScreenMessageViewportScrollbarLines: string[] = [];
 	private fullScreenMessageViewportDistanceFromBottom = 0;
 	private fullScreenMessageViewportLastMessageLineCount = 0;
-	private fullScreenMessageViewportLastMessageLines: string[] = [];
-	private fullScreenMessageViewportHasNewContentBelow = false;
-	private fullScreenMessageViewportJumpToBottomKeyDisplay = "";
 	private fullScreenPointerScrollTarget?: PointerScrollTarget;
 	private fullScreenSelectionAnchor?: FullScreenSelectionPoint;
 	private fullScreenSelectionFocus?: FullScreenSelectionPoint;
@@ -510,7 +507,6 @@ export class TUI extends Container {
 		this.fullScreenMessageViewportHeight = layout.messageViewportHeight;
 		this.fullScreenMessageViewportDistanceFromBottom = layout.messageViewportDistanceFromBottom;
 		this.fullScreenMessageViewportLastMessageLineCount = layout.totalMessageLines;
-		this.fullScreenMessageViewportLastMessageLines = layout.messageLines;
 		return layout.frameLines;
 	}
 
@@ -537,21 +533,12 @@ export class TUI extends Container {
 		const messageViewportHeight = Math.max(0, height - composerHeight);
 		let messageViewportDistanceFromBottom = this.fullScreenMessageViewportDistanceFromBottom;
 
-		if (options.preserveHistoricalView && messageViewportDistanceFromBottom > 0) {
-			if (messageLines.length > this.fullScreenMessageViewportLastMessageLineCount) {
-				messageViewportDistanceFromBottom +=
-					messageLines.length - this.fullScreenMessageViewportLastMessageLineCount;
-				this.fullScreenMessageViewportHasNewContentBelow = true;
-			} else if (
-				this.hasMessageViewportContentChangedBelowHistoricalWindow(
-					this.fullScreenMessageViewportLastMessageLines,
-					messageLines,
-					this.fullScreenMessageViewportLastMessageLineCount,
-					messageViewportDistanceFromBottom,
-				)
-			) {
-				this.fullScreenMessageViewportHasNewContentBelow = true;
-			}
+		if (
+			options.preserveHistoricalView &&
+			messageViewportDistanceFromBottom > 0 &&
+			messageLines.length > this.fullScreenMessageViewportLastMessageLineCount
+		) {
+			messageViewportDistanceFromBottom += messageLines.length - this.fullScreenMessageViewportLastMessageLineCount;
 		}
 
 		const maxMessageViewportDistanceFromBottom = this.getMaxMessageViewportDistanceFromBottom(
@@ -562,10 +549,6 @@ export class TUI extends Container {
 			messageViewportDistanceFromBottom,
 			maxMessageViewportDistanceFromBottom,
 		);
-		if (messageViewportDistanceFromBottom === 0) {
-			this.fullScreenMessageViewportHasNewContentBelow = false;
-		}
-
 		return {
 			frameLines: this.composeFullScreenLayout(
 				width,
@@ -582,25 +565,6 @@ export class TUI extends Container {
 			maxMessageViewportDistanceFromBottom,
 			messageViewportDistanceFromBottom,
 		};
-	}
-
-	private hasMessageViewportContentChangedBelowHistoricalWindow(
-		previousLines: readonly string[],
-		nextLines: readonly string[],
-		previousLineCount: number,
-		messageViewportDistanceFromBottom: number,
-	): boolean {
-		if (previousLines.length === 0 || nextLines.length !== previousLineCount) {
-			return false;
-		}
-
-		const hiddenBelowStart = Math.max(0, previousLineCount - messageViewportDistanceFromBottom);
-		for (let index = hiddenBelowStart; index < previousLineCount; index++) {
-			if (previousLines[index] !== nextLines[index]) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	private composeFullScreenLayout(
@@ -626,14 +590,8 @@ export class TUI extends Container {
 			messageViewportHeight,
 			messageViewportDistanceFromBottom,
 		);
-		const visibleMessageLines = this.decorateVisibleMessageViewportLines(
-			visibleMessageWindow,
-			messageViewportDistanceFromBottom,
-			messageLines.length,
-			messageViewportWidth,
-		);
 		const boundaryMessageLines = this.trimTrailingMessageViewportBoundaryBlankLines(
-			visibleMessageLines,
+			visibleMessageWindow.lines,
 			messageViewportDistanceFromBottom,
 		);
 		const topPadding = Math.max(0, messageViewportHeight - boundaryMessageLines.length);
@@ -725,65 +683,6 @@ export class TUI extends Container {
 		};
 	}
 
-	private decorateVisibleMessageViewportLines(
-		window: MessageViewportWindow,
-		messageViewportDistanceFromBottom: number,
-		totalMessageLines: number,
-		width: number,
-	): string[] {
-		const visibleMessageLines = [...window.lines];
-		if (visibleMessageLines.length === 0 || messageViewportDistanceFromBottom === 0) {
-			return visibleMessageLines;
-		}
-
-		const bottomHint =
-			window.end < totalMessageLines && this.fullScreenMessageViewportHasNewContentBelow
-				? this.getNewContentIndicatorText()
-				: undefined;
-		if (!bottomHint) {
-			return visibleMessageLines;
-		}
-
-		if (visibleMessageLines.length === 1) {
-			visibleMessageLines[0] = this.decorateViewportHintLine(visibleMessageLines[0] ?? "", bottomHint, width);
-			return visibleMessageLines;
-		}
-
-		const lastIndex = visibleMessageLines.length - 1;
-		visibleMessageLines[lastIndex] = this.decorateViewportHintLine(
-			visibleMessageLines[lastIndex] ?? "",
-			bottomHint,
-			width,
-			{ position: "suffix" },
-		);
-
-		return visibleMessageLines;
-	}
-
-	private getNewContentIndicatorText(): string {
-		const jumpKeyDisplay = this.fullScreenMessageViewportJumpToBottomKeyDisplay.trim();
-		if (jumpKeyDisplay.length === 0) {
-			return "↓ New content below";
-		}
-		return `↓ New content below · ${jumpKeyDisplay}`;
-	}
-
-	private decorateViewportHintLine(
-		baseLine: string,
-		hintText: string,
-		width: number,
-		options: { position?: "prefix" | "suffix" } = {},
-	): string {
-		const separator = " · ";
-		const hint = options.position === "prefix" ? `${hintText}${separator}` : `${separator}${hintText}`;
-		const hintWidth = visibleWidth(hint);
-		if (hintWidth >= width) {
-			return truncateToWidth(hintText, width);
-		}
-		const base = truncateToWidth(baseLine, width - hintWidth, "");
-		return options.position === "prefix" ? `${hint}${base}` : `${base}${hint}`;
-	}
-
 	private getMaxMessageViewportDistanceFromBottom(totalMessageLines: number, messageViewportHeight: number): number {
 		return Math.max(0, totalMessageLines - messageViewportHeight);
 	}
@@ -798,7 +697,6 @@ export class TUI extends Container {
 		});
 		this.fullScreenMessageViewportDistanceFromBottom = layout.messageViewportDistanceFromBottom;
 		this.fullScreenMessageViewportLastMessageLineCount = layout.totalMessageLines;
-		this.fullScreenMessageViewportLastMessageLines = layout.messageLines;
 		return layout;
 	}
 
@@ -817,9 +715,6 @@ export class TUI extends Container {
 		}
 
 		this.fullScreenMessageViewportDistanceFromBottom = nextDistanceFromBottom;
-		if (nextDistanceFromBottom === 0) {
-			this.fullScreenMessageViewportHasNewContentBelow = false;
-		}
 		this.requestRender();
 		return true;
 	}
@@ -867,20 +762,8 @@ export class TUI extends Container {
 		}
 
 		this.fullScreenMessageViewportDistanceFromBottom = 0;
-		this.fullScreenMessageViewportHasNewContentBelow = false;
 		this.requestRender();
 		return true;
-	}
-
-	setFullScreenMessageViewportJumpToBottomKeyDisplay(keyDisplay: string | undefined): void {
-		const nextKeyDisplay = keyDisplay?.trim() ?? "";
-		if (this.fullScreenMessageViewportJumpToBottomKeyDisplay === nextKeyDisplay) {
-			return;
-		}
-		this.fullScreenMessageViewportJumpToBottomKeyDisplay = nextKeyDisplay;
-		if (this.screenMode === "full-screen") {
-			this.requestRender();
-		}
 	}
 
 	setFullScreenPointerScrollTarget(

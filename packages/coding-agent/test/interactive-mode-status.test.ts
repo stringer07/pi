@@ -1,7 +1,8 @@
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { TruncatedText } from "../../tui/src/components/truncated-text.ts";
 import { type Component, Container, type Focusable, TUI } from "../../tui/src/tui.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
@@ -114,6 +115,120 @@ describe("InteractiveMode.showStatus", () => {
 		// adds spacer + text
 		expect(fakeThis.chatContainer.children).toHaveLength(5);
 		expect(renderLastLine(fakeThis.chatContainer)).toContain("STATUS_TWO");
+	});
+});
+
+describe("InteractiveMode.showClipboardStatus", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	test("shows Full-screen clipboard feedback above the editor and clears it after three seconds", () => {
+		vi.useFakeTimers();
+		const clipboardStatusContainer = new Container();
+		clipboardStatusContainer.addChild(new TruncatedText("", 1, 0));
+		const requestRender = vi.fn();
+		const showStatus = vi.fn();
+		const fakeThis = {
+			clipboardStatusContainer,
+			clipboardStatusTimeout: undefined as ReturnType<typeof setTimeout> | undefined,
+			isFullScreenMode: () => true,
+			showStatus,
+			ui: { requestRender },
+		};
+		const showClipboardStatus = (
+			InteractiveMode as unknown as {
+				prototype: { showClipboardStatus(this: typeof fakeThis, message: string): void };
+			}
+		).prototype.showClipboardStatus;
+
+		showClipboardStatus.call(fakeThis, "Copied selection to clipboard");
+
+		expect(renderAll(clipboardStatusContainer)).toContain("Copied selection to clipboard");
+		expect(showStatus).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(2999);
+		expect(clipboardStatusContainer.children).toHaveLength(1);
+		vi.advanceTimersByTime(1);
+		expect(clipboardStatusContainer.children).toHaveLength(1);
+		expect(renderAll(clipboardStatusContainer).trim()).toBe("");
+		expect(requestRender).toHaveBeenCalledTimes(2);
+	});
+
+	test("keeps the Full-screen Message viewport and selection fixed while feedback is visible", async () => {
+		vi.useFakeTimers();
+		const terminal = new VirtualTerminal(40, 7);
+		const ui = new TUI(terminal, undefined, { screenMode: "full-screen", fullScreenMouseReporting: true });
+		const clipboardStatusContainer = new Container();
+		clipboardStatusContainer.addChild(new TruncatedText("", 1, 0));
+		const fakeThis = {
+			clipboardStatusContainer,
+			clipboardStatusTimeout: undefined as ReturnType<typeof setTimeout> | undefined,
+			isFullScreenMode: () => true,
+			showStatus: vi.fn(),
+			ui,
+		};
+		const showClipboardStatus = (
+			InteractiveMode as unknown as {
+				prototype: { showClipboardStatus(this: typeof fakeThis, message: string): void };
+			}
+		).prototype.showClipboardStatus;
+		ui.setFullScreenSelectionHandler(() => {
+			showClipboardStatus.call(fakeThis, "Copied selection to clipboard");
+		});
+		ui.addChild(
+			{
+				render: () => Array.from({ length: 15 }, (_, index) => `message ${index + 1}`),
+				invalidate: () => {},
+			},
+			{ region: "message-viewport" },
+		);
+		ui.addChild(clipboardStatusContainer, { region: "composer-region" });
+		ui.addChild(new TestFocusableComponent("editor"), { region: "composer-region" });
+
+		ui.start();
+		try {
+			await vi.advanceTimersByTimeAsync(20);
+			expect(ui.pageMessageViewportUp()).toBe(true);
+			await vi.advanceTimersByTimeAsync(20);
+			const viewportBeforeCopy = terminal.getViewport();
+
+			terminal.sendInput("\x1b[<0;1;2M");
+			terminal.sendInput("\x1b[<32;9;2M");
+			terminal.sendInput("\x1b[<0;9;2m");
+			await vi.advanceTimersByTimeAsync(20);
+
+			expect(terminal.getViewport().slice(0, 5)).toEqual(viewportBeforeCopy.slice(0, 5));
+			expect(terminal.getCellStyle(1, 0)?.bgColor).toBe(8);
+			expect(terminal.getViewport()[5]).toContain("Copied selection to clipboard");
+
+			await vi.advanceTimersByTimeAsync(3020);
+			expect(terminal.getViewport().slice(0, 5)).toEqual(viewportBeforeCopy.slice(0, 5));
+			expect(terminal.getCellStyle(1, 0)?.bgColor).toBe(8);
+			expect(terminal.getViewport()[5]?.trim()).toBe("");
+		} finally {
+			ui.stop();
+		}
+	});
+
+	test("keeps clipboard feedback in the chat in Scrollback mode", () => {
+		const showStatus = vi.fn();
+		const fakeThis = {
+			isFullScreenMode: () => false,
+			showStatus,
+		};
+		const showClipboardStatus = (
+			InteractiveMode as unknown as {
+				prototype: { showClipboardStatus(this: typeof fakeThis, message: string): void };
+			}
+		).prototype.showClipboardStatus;
+
+		showClipboardStatus.call(fakeThis, "Copied selection to clipboard");
+
+		expect(showStatus).toHaveBeenCalledWith("Copied selection to clipboard");
 	});
 });
 

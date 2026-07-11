@@ -2,7 +2,6 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Editor } from "../src/components/editor.ts";
 import { type Component, type Focusable, TUI } from "../src/tui.ts";
-import { visibleWidth } from "../src/utils.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -471,12 +470,11 @@ describe("TUI Screen mode seam", () => {
 		tui.stop();
 	});
 
-	it("preserves the historical Message viewport view and shows a New content indicator while scrolled up", async () => {
+	it("preserves the historical Message viewport view when new content arrives", async () => {
 		const terminal = new VirtualTerminal(50, 5);
 		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
 		const messages = new MutableLines(["message 1", "message 2", "message 3", "message 4", "message 5"]);
 
-		tui.setFullScreenMessageViewportJumpToBottomKeyDisplay("Ctrl+Down");
 		tui.addChild(messages, { region: "message-viewport" });
 		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
 
@@ -490,64 +488,7 @@ describe("TUI Screen mode seam", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		assert.strictEqual(terminal.getViewport()[0], "message 1");
-		assert.strictEqual(terminal.getViewport()[1], "message 2");
-		assert.strictEqual(terminal.getViewport()[2], "message 3 · ↓ New content below · Ctrl+Down");
-
-		tui.stop();
-	});
-
-	it("shows a New content indicator for same-line updates below a historical Message viewport", async () => {
-		const terminal = new VirtualTerminal(50, 5);
-		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
-		const messages = new MutableLines(["message 1", "message 2", "message 3", "streaming old", "message 5"]);
-
-		tui.setFullScreenMessageViewportJumpToBottomKeyDisplay("Ctrl+Down");
-		tui.addChild(messages, { region: "message-viewport" });
-		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
-
-		tui.start();
-		await terminal.waitForRender();
-		assert.strictEqual(tui.pageMessageViewportUp(), true);
-		await terminal.waitForRender();
 		assert.deepStrictEqual(terminal.getViewport(), ["message 1", "message 2", "message 3", "editor", "footer"]);
-
-		messages.setLines(["message 1", "message 2", "message 3", "streaming updated", "message 5"]);
-		tui.requestRender();
-		await terminal.waitForRender();
-
-		assert.deepStrictEqual(terminal.getViewport(), [
-			"message 1",
-			"message 2",
-			"message 3 · ↓ New content below · Ctrl+Down",
-			"editor",
-			"footer",
-		]);
-
-		tui.stop();
-	});
-
-	it("keeps the New content indicator visible when the boundary message fills the terminal width", async () => {
-		const terminal = new VirtualTerminal(50, 5);
-		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
-		const messages = new MutableLines(["message 1", "message 2", "x".repeat(50), "message 4", "message 5"]);
-
-		tui.setFullScreenMessageViewportJumpToBottomKeyDisplay("Ctrl+Down");
-		tui.addChild(messages, { region: "message-viewport" });
-		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
-
-		tui.start();
-		await terminal.waitForRender();
-		assert.strictEqual(tui.pageMessageViewportUp(), true);
-		await terminal.waitForRender();
-
-		messages.setLines(["message 1", "message 2", "x".repeat(50), "message 4", "message 5", "message 6", "message 7"]);
-		tui.requestRender();
-		await terminal.waitForRender();
-
-		const boundaryLine = terminal.getViewport()[2] ?? "";
-		assert.ok(boundaryLine.endsWith("↓ New content below · Ctrl+Down"));
-		assert.ok(visibleWidth(boundaryLine) <= terminal.columns);
 
 		tui.stop();
 	});

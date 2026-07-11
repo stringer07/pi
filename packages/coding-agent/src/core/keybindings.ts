@@ -27,7 +27,6 @@ export interface AppKeybindings {
 	"app.message.dequeue": true;
 	"app.messageViewport.pageUp": true;
 	"app.messageViewport.pageDown": true;
-	"app.messageViewport.jumpToBottom": true;
 	"app.messageViewport.scrollUp": true;
 	"app.messageViewport.scrollDown": true;
 	"app.clipboard.pasteImage": true;
@@ -115,10 +114,6 @@ export const KEYBINDINGS = {
 	"app.messageViewport.pageDown": {
 		defaultKeys: "pageDown",
 		description: "Page down in Full-screen Message viewport",
-	},
-	"app.messageViewport.jumpToBottom": {
-		defaultKeys: "ctrl+down",
-		description: "Jump to bottom of Full-screen Message viewport",
 	},
 	"app.messageViewport.scrollUp": {
 		defaultKeys: [],
@@ -274,7 +269,6 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	dequeue: "app.message.dequeue",
 	messageViewportPageUp: "app.messageViewport.pageUp",
 	messageViewportPageDown: "app.messageViewport.pageDown",
-	messageViewportJumpToBottom: "app.messageViewport.jumpToBottom",
 	messageViewportScrollUp: "app.messageViewport.scrollUp",
 	messageViewportScrollDown: "app.messageViewport.scrollDown",
 	pasteImage: "app.clipboard.pasteImage",
