@@ -2,7 +2,6 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
-import { TruncatedText } from "../../tui/src/components/truncated-text.ts";
 import { type Component, Container, type Focusable, TUI } from "../../tui/src/tui.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
@@ -130,7 +129,6 @@ describe("InteractiveMode.showClipboardStatus", () => {
 	test("shows Full-screen clipboard feedback above the editor and clears it after three seconds", () => {
 		vi.useFakeTimers();
 		const clipboardStatusContainer = new Container();
-		clipboardStatusContainer.addChild(new TruncatedText("", 1, 0));
 		const requestRender = vi.fn();
 		const showStatus = vi.fn();
 		const fakeThis = {
@@ -153,17 +151,15 @@ describe("InteractiveMode.showClipboardStatus", () => {
 		vi.advanceTimersByTime(2999);
 		expect(clipboardStatusContainer.children).toHaveLength(1);
 		vi.advanceTimersByTime(1);
-		expect(clipboardStatusContainer.children).toHaveLength(1);
-		expect(renderAll(clipboardStatusContainer).trim()).toBe("");
+		expect(clipboardStatusContainer.children).toHaveLength(0);
 		expect(requestRender).toHaveBeenCalledTimes(2);
 	});
 
-	test("keeps the Full-screen Message viewport and selection fixed while feedback is visible", async () => {
+	test("keeps the historical Full-screen view anchored without leaving a blank feedback row", async () => {
 		vi.useFakeTimers();
 		const terminal = new VirtualTerminal(40, 7);
 		const ui = new TUI(terminal, undefined, { screenMode: "full-screen", fullScreenMouseReporting: true });
 		const clipboardStatusContainer = new Container();
-		clipboardStatusContainer.addChild(new TruncatedText("", 1, 0));
 		const fakeThis = {
 			clipboardStatusContainer,
 			clipboardStatusTimeout: undefined as ReturnType<typeof setTimeout> | undefined,
@@ -202,13 +198,13 @@ describe("InteractiveMode.showClipboardStatus", () => {
 			await vi.advanceTimersByTimeAsync(20);
 
 			expect(terminal.getViewport().slice(0, 5)).toEqual(viewportBeforeCopy.slice(0, 5));
-			expect(terminal.getCellStyle(1, 0)?.bgColor).toBe(8);
+			expect(terminal.getCellStyle(1, 0)?.bgColor).not.toBe(8);
 			expect(terminal.getViewport()[5]).toContain("Copied selection to clipboard");
 
 			await vi.advanceTimersByTimeAsync(3020);
-			expect(terminal.getViewport().slice(0, 5)).toEqual(viewportBeforeCopy.slice(0, 5));
-			expect(terminal.getCellStyle(1, 0)?.bgColor).toBe(8);
-			expect(terminal.getViewport()[5]?.trim()).toBe("");
+			expect(terminal.getViewport().slice(0, 6)).toEqual(viewportBeforeCopy.slice(0, 6));
+			expect(terminal.getCellStyle(1, 0)?.bgColor).not.toBe(8);
+			expect(terminal.getViewport()[6]).toBe("editor");
 		} finally {
 			ui.stop();
 		}

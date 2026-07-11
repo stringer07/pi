@@ -533,21 +533,26 @@ export class TUI extends Container {
 		const messageViewportHeight = Math.max(0, height - composerHeight);
 		let messageViewportDistanceFromBottom = this.fullScreenMessageViewportDistanceFromBottom;
 
-		if (
-			options.preserveHistoricalView &&
-			messageViewportDistanceFromBottom > 0 &&
-			messageLines.length > this.fullScreenMessageViewportLastMessageLineCount
-		) {
-			messageViewportDistanceFromBottom += messageLines.length - this.fullScreenMessageViewportLastMessageLineCount;
+		if (options.preserveHistoricalView && messageViewportDistanceFromBottom > 0) {
+			if (messageLines.length > this.fullScreenMessageViewportLastMessageLineCount) {
+				messageViewportDistanceFromBottom +=
+					messageLines.length - this.fullScreenMessageViewportLastMessageLineCount;
+			}
+			if (
+				this.fullScreenMessageViewportHeight > 0 &&
+				messageViewportHeight !== this.fullScreenMessageViewportHeight
+			) {
+				messageViewportDistanceFromBottom += this.fullScreenMessageViewportHeight - messageViewportHeight;
+			}
 		}
 
 		const maxMessageViewportDistanceFromBottom = this.getMaxMessageViewportDistanceFromBottom(
 			messageLines.length,
 			messageViewportHeight,
 		);
-		messageViewportDistanceFromBottom = Math.min(
-			messageViewportDistanceFromBottom,
-			maxMessageViewportDistanceFromBottom,
+		messageViewportDistanceFromBottom = Math.max(
+			0,
+			Math.min(messageViewportDistanceFromBottom, maxMessageViewportDistanceFromBottom),
 		);
 		return {
 			frameLines: this.composeFullScreenLayout(
@@ -695,6 +700,7 @@ export class TUI extends Container {
 		const layout = this.getFullScreenLayout(this.terminal.columns, this.terminal.rows, {
 			preserveHistoricalView: true,
 		});
+		this.fullScreenMessageViewportHeight = layout.messageViewportHeight;
 		this.fullScreenMessageViewportDistanceFromBottom = layout.messageViewportDistanceFromBottom;
 		this.fullScreenMessageViewportLastMessageLineCount = layout.totalMessageLines;
 		return layout;
@@ -1561,6 +1567,7 @@ export class TUI extends Container {
 				this.updateFullScreenSelection(pointerEvent);
 				this.fullScreenSelectionActive = false;
 				const selectedText = this.getFullScreenSelectedText();
+				this.clearFullScreenSelection();
 				if (selectedText.trim().length > 0) {
 					this.fullScreenSelectionHandler?.(selectedText);
 				}

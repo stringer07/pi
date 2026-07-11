@@ -507,9 +507,6 @@ export class InteractiveMode {
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
 		this.clipboardStatusContainer = new Container();
-		if (this.isFullScreenMode()) {
-			this.clipboardStatusContainer.addChild(new TruncatedText("", 1, 0));
-		}
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.keybindings = KeybindingsManager.create();
@@ -3211,7 +3208,6 @@ export class InteractiveMode {
 		this.clipboardStatusTimeout = setTimeout(() => {
 			this.clipboardStatusTimeout = undefined;
 			this.clipboardStatusContainer.clear();
-			this.clipboardStatusContainer.addChild(new TruncatedText("", 1, 0));
 			this.ui.requestRender();
 		}, 3000);
 	}
