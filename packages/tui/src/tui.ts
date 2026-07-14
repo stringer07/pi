@@ -332,6 +332,13 @@ type MessageViewportWindow = {
 	end: number;
 };
 
+type FullScreenMessageSnapshot = {
+	width: number;
+	lines: readonly string[];
+};
+
+type FullScreenRenderReason = "content" | "viewport";
+
 type OverlayStackEntry = {
 	component: Component;
 	options?: OverlayOptions;
@@ -406,6 +413,9 @@ export class TUI extends Container {
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
 	private renderRequested = false;
+	private pendingRenderReason: FullScreenRenderReason | undefined;
+	private scheduledRenderReason: FullScreenRenderReason | undefined;
+	private viewportNavigationHandledDuringInput = false;
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
@@ -429,6 +439,7 @@ export class TUI extends Container {
 	private fullScreenMessageViewportScrollbarLines: string[] = [];
 	private fullScreenMessageViewportDistanceFromBottom = 0;
 	private fullScreenMessageViewportLastMessageLineCount = 0;
+	private fullScreenMessageSnapshot: FullScreenMessageSnapshot | undefined;
 	private fullScreenPointerScrollTarget?: PointerScrollTarget;
 	private fullScreenSelectionAnchor?: FullScreenSelectionPoint;
 	private fullScreenSelectionFocus?: FullScreenSelectionPoint;
@@ -465,6 +476,7 @@ export class TUI extends Container {
 	}
 
 	override addChild(component: Component, options?: TUIChildOptions): void {
+		this.fullScreenMessageSnapshot = undefined;
 		super.addChild(component);
 		if (options?.region === undefined) {
 			this.childRegions.delete(component);
@@ -474,21 +486,26 @@ export class TUI extends Container {
 	}
 
 	override removeChild(component: Component): void {
+		this.fullScreenMessageSnapshot = undefined;
 		super.removeChild(component);
 		this.childRegions.delete(component);
 	}
 
 	override clear(): void {
+		this.fullScreenMessageSnapshot = undefined;
 		super.clear();
 		this.childRegions.clear();
 	}
 
 	override render(width: number): string[] {
+		// Direct callers always observe current child state. Scheduled frames set
+		// scheduledRenderReason so pure viewport navigation can reuse the snapshot.
+		const reason = this.scheduledRenderReason ?? "content";
 		switch (this.screenMode) {
 			case "scrollback":
 				return this.renderScrollbackMode(width);
 			case "full-screen":
-				return this.renderFullScreenMode(width);
+				return this.renderFullScreenMode(width, reason);
 		}
 	}
 
@@ -496,14 +513,18 @@ export class TUI extends Container {
 		return super.render(width);
 	}
 
-	private renderFullScreenMode(width: number): string[] {
+	private renderFullScreenMode(width: number, reason: FullScreenRenderReason = "content"): string[] {
 		if (this.childRegions.size === 0) {
 			this.fullScreenMessageViewportHeight = 0;
 			this.fullScreenMessageViewportScrollbarLines = [];
+			this.fullScreenMessageSnapshot = undefined;
 			return super.render(width);
 		}
 
-		const layout = this.getFullScreenLayout(width, this.terminal.rows, { preserveHistoricalView: true });
+		const layout = this.getFullScreenLayout(width, this.terminal.rows, {
+			preserveHistoricalView: true,
+			reason,
+		});
 		this.fullScreenMessageViewportHeight = layout.messageViewportHeight;
 		this.fullScreenMessageViewportDistanceFromBottom = layout.messageViewportDistanceFromBottom;
 		this.fullScreenMessageViewportLastMessageLineCount = layout.totalMessageLines;
@@ -521,13 +542,35 @@ export class TUI extends Container {
 		return lines;
 	}
 
+	private getMessageViewportWidth(width: number): number {
+		return this.fullScreenMessageViewportScrollbar && width > 1 ? width - 1 : width;
+	}
+
+	private getMessageLinesForLayout(messageViewportWidth: number, reason: FullScreenRenderReason): string[] {
+		if (
+			reason === "viewport" &&
+			this.fullScreenMessageSnapshot &&
+			this.fullScreenMessageSnapshot.width === messageViewportWidth
+		) {
+			return this.fullScreenMessageSnapshot.lines as string[];
+		}
+
+		const messageLines = this.renderChildren(this.getChildrenOutsideComposerRegion(), messageViewportWidth);
+		this.fullScreenMessageSnapshot = {
+			width: messageViewportWidth,
+			lines: messageLines,
+		};
+		return messageLines;
+	}
+
 	private getFullScreenLayout(
 		width: number,
 		height: number,
-		options: { preserveHistoricalView?: boolean } = {},
+		options: { preserveHistoricalView?: boolean; reason?: FullScreenRenderReason } = {},
 	): FullScreenLayout {
-		const messageViewportWidth = this.fullScreenMessageViewportScrollbar && width > 1 ? width - 1 : width;
-		const messageLines = this.renderChildren(this.getChildrenOutsideComposerRegion(), messageViewportWidth);
+		const reason = options.reason ?? "content";
+		const messageViewportWidth = this.getMessageViewportWidth(width);
+		const messageLines = this.getMessageLinesForLayout(messageViewportWidth, reason);
 		const composerLines = this.renderChildren(this.getChildrenInScreenRegion("composer-region"), width);
 		const composerHeight = Math.min(height, composerLines.length);
 		const messageViewportHeight = Math.max(0, height - composerHeight);
@@ -692,36 +735,37 @@ export class TUI extends Container {
 		return Math.max(0, totalMessageLines - messageViewportHeight);
 	}
 
-	private getCurrentFullScreenLayout(): FullScreenLayout | undefined {
-		if (this.screenMode !== "full-screen" || this.childRegions.size === 0) {
-			return undefined;
-		}
-
-		const layout = this.getFullScreenLayout(this.terminal.columns, this.terminal.rows, {
-			preserveHistoricalView: true,
-		});
-		this.fullScreenMessageViewportHeight = layout.messageViewportHeight;
-		this.fullScreenMessageViewportDistanceFromBottom = layout.messageViewportDistanceFromBottom;
-		this.fullScreenMessageViewportLastMessageLineCount = layout.totalMessageLines;
-		return layout;
+	private getCommittedMaxMessageViewportDistanceFromBottom(): number {
+		return this.getMaxMessageViewportDistanceFromBottom(
+			this.fullScreenMessageViewportLastMessageLineCount,
+			this.fullScreenMessageViewportHeight,
+		);
 	}
 
 	private adjustMessageViewportDistanceFromBottom(delta: number): boolean {
-		const layout = this.getCurrentFullScreenLayout();
-		if (!layout || layout.messageViewportHeight <= 0 || layout.maxMessageViewportDistanceFromBottom === 0) {
+		// Mark the focused-input dispatch as viewport navigation even for no-ops at a
+		// boundary, so handleInput does not fall back to a full content render.
+		this.viewportNavigationHandledDuringInput = true;
+		if (this.screenMode !== "full-screen" || this.childRegions.size === 0) {
+			return false;
+		}
+
+		const messageViewportHeight = this.fullScreenMessageViewportHeight;
+		const maxMessageViewportDistanceFromBottom = this.getCommittedMaxMessageViewportDistanceFromBottom();
+		if (messageViewportHeight <= 0 || maxMessageViewportDistanceFromBottom === 0) {
 			return false;
 		}
 
 		const nextDistanceFromBottom = Math.max(
 			0,
-			Math.min(layout.maxMessageViewportDistanceFromBottom, layout.messageViewportDistanceFromBottom + delta),
+			Math.min(maxMessageViewportDistanceFromBottom, this.fullScreenMessageViewportDistanceFromBottom + delta),
 		);
-		if (nextDistanceFromBottom === layout.messageViewportDistanceFromBottom) {
+		if (nextDistanceFromBottom === this.fullScreenMessageViewportDistanceFromBottom) {
 			return false;
 		}
 
 		this.fullScreenMessageViewportDistanceFromBottom = nextDistanceFromBottom;
-		this.requestRender();
+		this.requestViewportRender();
 		return true;
 	}
 
@@ -738,19 +782,19 @@ export class TUI extends Container {
 	}
 
 	pageMessageViewportUp(): boolean {
-		const layout = this.getCurrentFullScreenLayout();
-		if (!layout || layout.messageViewportHeight <= 0) {
+		this.viewportNavigationHandledDuringInput = true;
+		if (this.screenMode !== "full-screen" || this.fullScreenMessageViewportHeight <= 0) {
 			return false;
 		}
-		return this.adjustMessageViewportDistanceFromBottom(layout.messageViewportHeight);
+		return this.adjustMessageViewportDistanceFromBottom(this.fullScreenMessageViewportHeight);
 	}
 
 	pageMessageViewportDown(): boolean {
-		const layout = this.getCurrentFullScreenLayout();
-		if (!layout || layout.messageViewportHeight <= 0) {
+		this.viewportNavigationHandledDuringInput = true;
+		if (this.screenMode !== "full-screen" || this.fullScreenMessageViewportHeight <= 0) {
 			return false;
 		}
-		return this.adjustMessageViewportDistanceFromBottom(-layout.messageViewportHeight);
+		return this.adjustMessageViewportDistanceFromBottom(-this.fullScreenMessageViewportHeight);
 	}
 
 	scrollMessageViewportUp(): boolean {
@@ -762,13 +806,13 @@ export class TUI extends Container {
 	}
 
 	jumpMessageViewportToBottom(): boolean {
-		const layout = this.getCurrentFullScreenLayout();
-		if (!layout || layout.messageViewportDistanceFromBottom === 0) {
+		this.viewportNavigationHandledDuringInput = true;
+		if (this.screenMode !== "full-screen" || this.fullScreenMessageViewportDistanceFromBottom === 0) {
 			return false;
 		}
 
 		this.fullScreenMessageViewportDistanceFromBottom = 0;
-		this.requestRender();
+		this.requestViewportRender();
 		return true;
 	}
 
@@ -1078,6 +1122,7 @@ export class TUI extends Container {
 	}
 
 	override invalidate(): void {
+		this.fullScreenMessageSnapshot = undefined;
 		super.invalidate();
 		for (const overlay of this.overlayStack) overlay.component.invalidate?.();
 	}
@@ -1172,7 +1217,18 @@ export class TUI extends Container {
 	}
 
 	requestRender(force = false): void {
+		this.queueRender("content", force);
+	}
+
+	private requestViewportRender(): void {
+		this.viewportNavigationHandledDuringInput = true;
+		this.queueRender("viewport");
+	}
+
+	private queueRender(reason: FullScreenRenderReason, force = false): void {
+		this.pendingRenderReason = this.mergeFullScreenRenderReason(this.pendingRenderReason, reason);
 		if (force) {
+			this.fullScreenMessageSnapshot = undefined;
 			this.previousLines = [];
 			this.previousWidth = -1; // -1 triggers widthChanged, forcing a full clear
 			this.previousHeight = -1; // -1 triggers heightChanged, forcing a full clear
@@ -1198,6 +1254,22 @@ export class TUI extends Container {
 		if (this.renderRequested) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
+	}
+
+	private mergeFullScreenRenderReason(
+		current: FullScreenRenderReason | undefined,
+		next: FullScreenRenderReason,
+	): FullScreenRenderReason {
+		if (current === "content" || next === "content") {
+			return "content";
+		}
+		return "viewport";
+	}
+
+	private consumeFullScreenRenderReason(): FullScreenRenderReason {
+		const reason = this.pendingRenderReason ?? "content";
+		this.pendingRenderReason = undefined;
+		return reason;
 	}
 
 	private scheduleRender(): void {
@@ -1295,8 +1367,14 @@ export class TUI extends Container {
 			if (isKeyRelease(data) && !this.focusedComponent.wantsKeyRelease) {
 				return;
 			}
+			this.viewportNavigationHandledDuringInput = false;
 			this.focusedComponent.handleInput(data);
-			this.requestRender();
+			// Message viewport navigation already handled this input, even if it was a
+			// no-op at a scroll boundary and therefore did not schedule a frame.
+			if (!this.viewportNavigationHandledDuringInput) {
+				this.requestRender();
+			}
+			this.viewportNavigationHandledDuringInput = false;
 		}
 	}
 
@@ -1582,6 +1660,17 @@ export class TUI extends Container {
 
 		this.clearFullScreenSelection();
 
+		const height = this.terminal.rows;
+		const committedMessageViewportHeight = this.fullScreenMessageViewportHeight;
+		if (committedMessageViewportHeight > 0 && pointerEvent.row < committedMessageViewportHeight) {
+			if (pointerEvent.direction === "up") {
+				this.scrollMessageViewportUp();
+				return true;
+			}
+			this.scrollMessageViewportDown();
+			return true;
+		}
+
 		const layout = this.getFullScreenPointerLayout();
 		if (!layout) {
 			return true;
@@ -1599,7 +1688,7 @@ export class TUI extends Container {
 		const targetSpan = this.getVisibleFullScreenComponentRowSpan(
 			this.fullScreenPointerScrollTarget?.component,
 			layout.width,
-			layout.height,
+			height,
 			layout.composerVisibleStartOffset,
 			layout.composerHeight,
 		);
@@ -1634,6 +1723,20 @@ export class TUI extends Container {
 
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
+		if (this.fullScreenMessageViewportHeight > 0) {
+			const composerHeight = Math.max(0, height - this.fullScreenMessageViewportHeight);
+			return {
+				width,
+				height,
+				messageViewportHeight: this.fullScreenMessageViewportHeight,
+				composerHeight,
+				// The visible Composer span is measured against the bottom-aligned region.
+				// When committed layout is available, the full composer height equals the
+				// visible height, so the visible start offset is zero.
+				composerVisibleStartOffset: 0,
+			};
+		}
+
 		const composerLines = this.renderChildren(this.getChildrenInScreenRegion("composer-region"), width);
 		const composerHeight = Math.min(height, composerLines.length);
 		return {
@@ -2104,8 +2207,14 @@ export class TUI extends Container {
 			return targetScreenRow - currentScreenRow;
 		};
 
-		// Render all components to get new lines
-		let newLines = this.render(width);
+		// Render all components to get new lines through the public override point.
+		this.scheduledRenderReason = this.consumeFullScreenRenderReason();
+		let newLines: string[];
+		try {
+			newLines = this.render(width);
+		} finally {
+			this.scheduledRenderReason = undefined;
+		}
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.overlayStack.length > 0) {

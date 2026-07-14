@@ -51,6 +51,53 @@ class WidthAwareLines implements Component {
 	invalidate(): void {}
 }
 
+class CountingLines implements Component {
+	renderCount = 0;
+	private lines: string[];
+
+	constructor(lines: string[]) {
+		this.lines = lines;
+	}
+
+	setLines(lines: string[]): void {
+		this.lines = lines;
+	}
+
+	render(): string[] {
+		this.renderCount += 1;
+		return this.lines;
+	}
+
+	invalidate(): void {}
+}
+
+class ViewportScrollInput implements Component, Focusable {
+	focused = false;
+	private readonly tui: TUI;
+	private readonly line: string;
+
+	constructor(tui: TUI, line = "editor") {
+		this.tui = tui;
+		this.line = line;
+	}
+
+	render(): string[] {
+		return [this.line];
+	}
+
+	handleInput(data: string): void {
+		if (data === "\x1b[A") {
+			this.tui.scrollMessageViewportUp();
+			return;
+		}
+		if (data === "\x1b[B") {
+			this.tui.scrollMessageViewportDown();
+		}
+	}
+
+	invalidate(): void {}
+}
+
 class LoggingVirtualTerminal extends VirtualTerminal {
 	private writes: string[] = [];
 
@@ -489,6 +536,161 @@ describe("TUI Screen mode seam", () => {
 		await terminal.waitForRender();
 
 		assert.deepStrictEqual(terminal.getViewport(), ["message 1", "message 2", "message 3", "editor", "footer"]);
+
+		tui.stop();
+	});
+
+	it("reuses the Full-screen Message viewport snapshot for pure scrolling", async () => {
+		const terminal = new VirtualTerminal(50, 5);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+		const messages = new CountingLines([
+			"message 1",
+			"message 2",
+			"message 3",
+			"message 4",
+			"message 5",
+			"message 6",
+			"message 7",
+			"message 8",
+		]);
+
+		tui.addChild(messages, { region: "message-viewport" });
+		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		const renderCountAfterStart = messages.renderCount;
+		assert.ok(renderCountAfterStart > 0);
+
+		assert.strictEqual(tui.scrollMessageViewportUp(), true);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(terminal.getViewport(), ["message 5", "message 6", "message 7", "editor", "footer"]);
+		assert.strictEqual(messages.renderCount, renderCountAfterStart);
+
+		for (let i = 0; i < 4; i++) {
+			assert.strictEqual(tui.scrollMessageViewportUp(), true);
+			await terminal.waitForRender();
+		}
+		assert.strictEqual(tui.scrollMessageViewportUp(), false);
+		assert.deepStrictEqual(terminal.getViewport(), ["message 1", "message 2", "message 3", "editor", "footer"]);
+		assert.strictEqual(messages.renderCount, renderCountAfterStart);
+
+		assert.strictEqual(tui.pageMessageViewportDown(), true);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(terminal.getViewport(), ["message 4", "message 5", "message 6", "editor", "footer"]);
+		assert.strictEqual(messages.renderCount, renderCountAfterStart);
+
+		tui.stop();
+	});
+
+	it("refreshes the Full-screen Message viewport snapshot when content changes", async () => {
+		const terminal = new VirtualTerminal(50, 5);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+		const messages = new CountingLines(["message 1", "message 2", "message 3", "message 4", "message 5"]);
+
+		tui.addChild(messages, { region: "message-viewport" });
+		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		const renderCountAfterStart = messages.renderCount;
+
+		assert.strictEqual(tui.pageMessageViewportUp(), true);
+		await terminal.waitForRender();
+		assert.strictEqual(messages.renderCount, renderCountAfterStart);
+		assert.deepStrictEqual(terminal.getViewport(), ["message 1", "message 2", "message 3", "editor", "footer"]);
+
+		messages.setLines(["message 1", "message 2", "message 3", "message 4", "message 5", "message 6", "message 7"]);
+		tui.requestRender();
+		await terminal.waitForRender();
+		assert.ok(messages.renderCount > renderCountAfterStart);
+		assert.deepStrictEqual(terminal.getViewport(), ["message 1", "message 2", "message 3", "editor", "footer"]);
+
+		const renderCountAfterContent = messages.renderCount;
+		assert.strictEqual(tui.scrollMessageViewportDown(), true);
+		await terminal.waitForRender();
+		assert.strictEqual(messages.renderCount, renderCountAfterContent);
+		assert.deepStrictEqual(terminal.getViewport(), ["message 2", "message 3", "message 4", "editor", "footer"]);
+
+		tui.stop();
+	});
+
+	it("keeps focused keyboard Message viewport navigation from re-rendering history", async () => {
+		const terminal = new VirtualTerminal(50, 5);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+		const messages = new CountingLines([
+			"message 1",
+			"message 2",
+			"message 3",
+			"message 4",
+			"message 5",
+			"message 6",
+			"message 7",
+			"message 8",
+		]);
+		const editor = new ViewportScrollInput(tui);
+
+		tui.addChild(messages, { region: "message-viewport" });
+		tui.addChild(editor, { region: "composer-region" });
+		tui.addChild(new Lines(["footer"]), { region: "composer-region" });
+		tui.setFocus(editor);
+
+		tui.start();
+		await terminal.waitForRender();
+		const renderCountAfterStart = messages.renderCount;
+
+		terminal.sendInput("\x1b[A");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(terminal.getViewport(), ["message 5", "message 6", "message 7", "editor", "footer"]);
+		assert.strictEqual(messages.renderCount, renderCountAfterStart);
+
+		for (let i = 0; i < 10; i++) {
+			terminal.sendInput("\x1b[A");
+			await terminal.waitForRender();
+		}
+		assert.deepStrictEqual(terminal.getViewport(), ["message 1", "message 2", "message 3", "editor", "footer"]);
+		assert.strictEqual(messages.renderCount, renderCountAfterStart);
+
+		tui.stop();
+	});
+
+	it("keeps content render priority when mixed with viewport navigation", async () => {
+		const terminal = new VirtualTerminal(50, 5);
+		const tui = new TUI(terminal, undefined, { screenMode: "full-screen" });
+		const messages = new CountingLines(["message 1", "message 2", "message 3", "message 4", "message 5"]);
+
+		tui.addChild(messages, { region: "message-viewport" });
+		tui.addChild(new Lines(["editor", "footer"]), { region: "composer-region" });
+
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(tui.pageMessageViewportUp(), true);
+		await terminal.waitForRender();
+		const renderCountAfterScroll = messages.renderCount;
+
+		messages.setLines(["message 1", "message 2", "message 3", "message 4", "message 5", "message 6", "message 7"]);
+		tui.requestRender();
+		assert.strictEqual(tui.scrollMessageViewportDown(), true);
+		await terminal.waitForRender();
+		assert.ok(messages.renderCount > renderCountAfterScroll);
+		assert.deepStrictEqual(terminal.getViewport(), ["message 2", "message 3", "message 4", "editor", "footer"]);
+
+		const renderCountAfterContentFirst = messages.renderCount;
+		messages.setLines([
+			"message 1",
+			"message 2",
+			"message 3",
+			"message 4",
+			"message 5",
+			"message 6",
+			"message 7",
+			"message 8",
+		]);
+		assert.strictEqual(tui.scrollMessageViewportDown(), true);
+		tui.requestRender();
+		await terminal.waitForRender();
+		assert.ok(messages.renderCount > renderCountAfterContentFirst);
+		assert.deepStrictEqual(terminal.getViewport(), ["message 3", "message 4", "message 5", "editor", "footer"]);
 
 		tui.stop();
 	});
