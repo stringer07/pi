@@ -42,6 +42,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Using Pi](usage.md) - interactive mode, slash commands, context files, and CLI reference.
 - [Full-screen mode](full-screen-mode.md) - fixed Composer region layout, viewport scrolling, mouse scope, and terminal restoration.
 - [Providers](providers.md) - subscription and API-key setup for built-in providers.
+- [llama.cpp](llama-cpp.md) - run a local router and manage models with `/llama`.
 - [Security](security.md) - project trust, sandbox boundaries, and vulnerability reporting.
 - [Containerization](containerization.md) - sandbox pi with Gondolin, Docker, or OpenShell.
 - [Settings](settings.md) - global and project settings.
