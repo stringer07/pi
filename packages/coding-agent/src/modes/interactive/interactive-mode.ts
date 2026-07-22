@@ -858,6 +858,13 @@ export class InteractiveMode {
 	async run(): Promise<void> {
 		await this.init();
 
+		if (!process.env.PI_OFFLINE) {
+			void this.session.modelRuntime
+				.refresh()
+				.then(() => this.updateAvailableProviderCount())
+				.catch(() => {});
+		}
+
 		// Start version check asynchronously
 		checkForNewPiVersion(this.version).then((newRelease) => {
 			if (newRelease) {
@@ -4451,10 +4458,13 @@ export class InteractiveMode {
 		}
 	}
 
-	/** Update the footer's available provider count from current model candidates */
-	private async updateAvailableProviderCount(): Promise<void> {
-		const models = await this.getModelCandidates();
-		const uniqueProviders = new Set(models.map((m) => m.provider));
+	/** Update the footer's available provider count from the current snapshot without refreshing catalogs. */
+	private updateAvailableProviderCount(): void {
+		const models =
+			this.session.scopedModels.length > 0
+				? this.session.scopedModels.map((scoped) => scoped.model)
+				: this.session.modelRuntime.getAvailableSnapshot();
+		const uniqueProviders = new Set(models.map((model) => model.provider));
 		this.footerDataProvider.setAvailableProviderCount(uniqueProviders.size);
 	}
 
