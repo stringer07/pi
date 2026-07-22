@@ -18,6 +18,7 @@ import { basename, dirname } from "node:path";
 import type {
 	Agent,
 	AgentEvent,
+	AgentLoopTurnUpdate,
 	AgentMessage,
 	AgentState,
 	AgentTool,
@@ -279,12 +280,27 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
+type AutoCompactionOutcome =
+	| { type: "compacted"; shouldContinue: boolean }
+	| { type: "not_compacted"; aborted: boolean };
+
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let tokens = 0;
 	for (const message of messages) {
 		tokens += estimateTokens(message);
 	}
 	return tokens;
+}
+
+/** Whether an estimated usage value predates the latest compaction boundary. */
+function isEstimatedUsageBeforeCompaction(
+	messages: AgentMessage[],
+	lastUsageIndex: number | null,
+	compactionEntry: CompactionEntry | null,
+): boolean {
+	if (lastUsageIndex === null || !compactionEntry) return false;
+	const usageMessage = messages[lastUsageIndex];
+	return usageMessage.role === "assistant" && usageMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
 }
 
 // ============================================================================
@@ -323,6 +339,8 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
+	/** Prevents the synthetic error after a failed mid-run compaction from being retried post-run. */
+	private _midRunCompactionFailed = false;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -524,17 +542,62 @@ export class AgentSession {
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
 			const previousContext = previousSnapshot?.context ?? turn.context;
+			const refreshedContext = {
+				...previousContext,
+				systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt,
+				tools: this.agent.state.tools.slice(),
+			};
+			const compactionSnapshot = await this._compactBeforeNextTurn({
+				...turn,
+				context: refreshedContext,
+			});
 
 			return {
 				...previousSnapshot,
-				context: {
-					...previousContext,
-					systemPrompt: this._systemPromptOverride ?? this._baseSystemPrompt,
-					tools: this.agent.state.tools.slice(),
-				},
+				context: compactionSnapshot?.context ?? refreshedContext,
 				model: this.agent.state.model,
 				thinkingLevel: this.agent.state.thinkingLevel,
 			};
+		};
+	}
+
+	private async _compactBeforeNextTurn(turn: PrepareNextTurnContext): Promise<AgentLoopTurnUpdate | undefined> {
+		const settings = this.settingsManager.getCompactionSettings();
+		if (!settings.enabled || (turn.toolResults.length === 0 && !this.agent.hasQueuedMessages())) {
+			return undefined;
+		}
+
+		const contextWindow = this.model?.contextWindow ?? 0;
+		if (!this.model || contextWindow <= 0) {
+			return undefined;
+		}
+
+		const contextEstimate = estimateContextTokens(turn.context.messages);
+		const previousCompaction = getLatestCompactionEntry(this.sessionManager.getBranch());
+		if (isEstimatedUsageBeforeCompaction(turn.context.messages, contextEstimate.lastUsageIndex, previousCompaction)) {
+			return undefined;
+		}
+
+		const contextTokens = contextEstimate.tokens;
+		if (!shouldCompact(contextTokens, contextWindow, settings)) {
+			return undefined;
+		}
+
+		const outcome = await this._runAutoCompactionOutcome("threshold", false);
+		if (outcome.type !== "compacted") {
+			this._midRunCompactionFailed = true;
+			if (outcome.aborted) {
+				this.agent.abort();
+				throw new Error("Auto-compaction cancelled before the next provider request.");
+			}
+			throw new Error("Auto-compaction failed before the next provider request.");
+		}
+
+		return {
+			context: {
+				...turn.context,
+				messages: this.agent.state.messages.slice(),
+			},
 		};
 	}
 
@@ -586,7 +649,7 @@ export class AgentSession {
 		}
 	}
 
-	// Track last assistant message for auto-compaction check
+	// Track last assistant message for post-run retry and compaction checks.
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
@@ -1065,6 +1128,7 @@ export class AgentSession {
 			}
 		} finally {
 			this._systemPromptOverride = undefined;
+			this._midRunCompactionFailed = false;
 			this._flushPendingBashMessages();
 			await this._emitAgentSettled();
 		}
@@ -1074,6 +1138,10 @@ export class AgentSession {
 		const msg = this._lastAssistantMessage;
 		this._lastAssistantMessage = undefined;
 		if (!msg) {
+			return false;
+		}
+		if (this._midRunCompactionFailed) {
+			this._midRunCompactionFailed = false;
 			return false;
 		}
 
@@ -2021,12 +2089,7 @@ export class AgentSession {
 			// Verify the usage source is post-compaction. Kept pre-compaction messages
 			// have stale usage reflecting the old (larger) context and would falsely
 			// trigger compaction right after one just finished.
-			const usageMsg = messages[estimate.lastUsageIndex];
-			if (
-				compactionEntry &&
-				usageMsg.role === "assistant" &&
-				(usageMsg as AssistantMessage).timestamp <= new Date(compactionEntry.timestamp).getTime()
-			) {
+			if (isEstimatedUsageBeforeCompaction(messages, estimate.lastUsageIndex, compactionEntry)) {
 				return false;
 			}
 			contextTokens = estimate.tokens;
@@ -2043,12 +2106,20 @@ export class AgentSession {
 	 * Internal: Run auto-compaction with events.
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+		const outcome = await this._runAutoCompactionOutcome(reason, willRetry);
+		return outcome.type === "compacted" && outcome.shouldContinue;
+	}
+
+	private async _runAutoCompactionOutcome(
+		reason: "overflow" | "threshold",
+		willRetry: boolean,
+	): Promise<AutoCompactionOutcome> {
 		const settings = this.settingsManager.getCompactionSettings();
 		let started = false;
 
 		try {
 			if (!this.model) {
-				return false;
+				return { type: "not_compacted", aborted: false };
 			}
 
 			let apiKey: string | undefined;
@@ -2056,7 +2127,7 @@ export class AgentSession {
 			let env: Record<string, string> | undefined;
 			if (this.agent.streamFunction === streamSimple) {
 				const authResult = await this._modelRuntime.getAuth(this.model);
-				if (!authResult?.auth.apiKey) return false;
+				if (!authResult?.auth.apiKey) return { type: "not_compacted", aborted: false };
 				apiKey = authResult.auth.apiKey;
 				headers = withoutDeletedHeaders(authResult.auth.headers);
 				env = authResult.env;
@@ -2067,9 +2138,7 @@ export class AgentSession {
 			const pathEntries = this.sessionManager.getBranch();
 
 			const preparation = prepareCompaction(pathEntries, settings);
-			if (!preparation) {
-				return false;
-			}
+			if (!preparation) return { type: "not_compacted", aborted: false };
 
 			this._emit({ type: "compaction_start", reason });
 			this._autoCompactionAbortController = new AbortController();
@@ -2097,7 +2166,7 @@ export class AgentSession {
 						aborted: true,
 						willRetry: false,
 					});
-					return false;
+					return { type: "not_compacted", aborted: true };
 				}
 
 				if (extensionResult?.compaction) {
@@ -2149,7 +2218,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
-				return false;
+				return { type: "not_compacted", aborted: true };
 			}
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
@@ -2189,28 +2258,30 @@ export class AgentSession {
 				if (lastMsg?.role === "assistant" && (lastMsg as AssistantMessage).stopReason === "error") {
 					this.agent.state.messages = messages.slice(0, -1);
 				}
-				return true;
+				return { type: "compacted", shouldContinue: true };
 			}
 
 			// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
 			// Continue once so queued messages are delivered.
-			return this.agent.hasQueuedMessages();
+			return { type: "compacted", shouldContinue: this.agent.hasQueuedMessages() };
 		} catch (error) {
+			const aborted = this._autoCompactionAbortController?.signal.aborted ?? false;
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			if (started) {
 				this._emit({
 					type: "compaction_end",
 					reason,
 					result: undefined,
-					aborted: false,
+					aborted,
 					willRetry: false,
-					errorMessage:
-						reason === "overflow"
+					errorMessage: aborted
+						? undefined
+						: reason === "overflow"
 							? `Context overflow recovery failed: ${errorMessage}`
 							: `Auto-compaction failed: ${errorMessage}`,
 				});
 			}
-			return false;
+			return { type: "not_compacted", aborted };
 		} finally {
 			this._autoCompactionAbortController = undefined;
 		}

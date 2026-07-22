@@ -32,7 +32,7 @@ Auto-compaction triggers when:
 contextTokens > contextWindow - reserveTokens
 ```
 
-By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response.
+During an active tool loop, pi checks this threshold after the assistant turn and its tool results finish, before starting the next provider request. The check uses the same compaction and retry path as post-run and overflow recovery. When the provider supplies no usable usage data, this mid-run check estimates the full context from message content so compatible providers remain protected. Transient summary failures follow `retry` settings (three retries by default, plus the initial attempt); non-retryable failures stop before the next provider request. If an extension's `session_before_compact` handler cancels mid-run compaction, pi ends the active run before that request as well. By default, `reserveTokens` is 16384 tokens (configurable in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settings.json`). This leaves room for the LLM's response.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
 
